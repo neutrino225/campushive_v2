@@ -1,0 +1,520 @@
+{
+	"info": {
+		"_postman_id": "a8a1b8f0-5c1a-4f5b-8c1e-3e2f6a7b8d9c",
+		"name": "CampusHive API",
+		"description": "Postman collection for the CampusHive FastAPI application, covering auth, admin, multi-agent endpoints, and conversation memory management. Includes session-based chat functionality for context-aware conversations.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Root & Health",
+			"item": [
+				{
+					"name": "Get Root",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/",
+							"host": ["{{base_url}}"],
+							"path": [""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Admin Health",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/admin/health",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "health"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Vector Stores Health",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/admin/health/vector-stores",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "health", "vector-stores"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Signup",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"new_user\",\n  \"email\": \"new@example.com\",\n  \"password\": \"Password123!\"\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/signup",
+							"host": ["{{base_url}}"],
+							"path": ["auth", "signup"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Login",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"admin\",\n  \"password\": \"Admin123!\"\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/auth/login",
+							"host": ["{{base_url}}"],
+							"path": ["auth", "login"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Current User",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/auth/me",
+							"host": ["{{base_url}}"],
+							"path": ["auth", "me"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Logout",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/auth/logout",
+							"host": ["{{base_url}}"],
+							"path": ["auth", "logout"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Chat Management",
+			"item": [
+				{
+					"name": "List Chat Sessions",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/chats",
+							"host": ["{{base_url}}"],
+							"path": ["chats"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Create Chat Session",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"session_name\": \"My Session\"\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/chats",
+							"host": ["{{base_url}}"],
+							"path": ["chats"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Chat Session",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/chats/{{session_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["chats", "{{session_id}}"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Add Message to Session",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"content\": \"Hello, this is a message.\"\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/chats/{{session_id}}/messages",
+							"host": ["{{base_url}}"],
+							"path": ["chats", "{{session_id}}", "messages"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete Chat Session",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/chats/{{session_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["chats", "{{session_id}}"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Admin - Users",
+			"item": [
+				{
+					"name": "List Users",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/admin/users",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "users"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get User",
+					"request": {
+						"method": "GET",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/admin/users/{{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "users", "{{user_id}}"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Update User Role",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" },
+							{ "key": "Content-Type", "value": "application/json" }
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"role\": \"faculty\"\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/admin/users/{{user_id}}/role",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "users", "{{user_id}}", "role"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Delete User",
+					"request": {
+						"method": "DELETE",
+						"header": [
+							{ "key": "Authorization", "value": "Bearer {{auth_token}}" }
+						],
+						"url": {
+							"raw": "{{base_url}}/admin/users/{{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "users", "{{user_id}}"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Multi-Agent",
+			"item": [
+				{
+					"name": "Chat (Non-Streaming)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"question\": \"Who is the head of computer science?\",\n    \"stream\": false\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/multiagent/chat",
+							"host": ["{{base_url}}"],
+							"path": ["multiagent", "chat"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Chat (Streaming)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"question\": \"What are the admission requirements for BSCS?\",\n    \"stream\": true\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/multiagent/chat",
+							"host": ["{{base_url}}"],
+							"path": ["multiagent", "chat"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Chat with Session (Non-Streaming)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"question\": \"Who is the head of computer science?\",\n    \"session_id\": \"user_001\",\n    \"stream\": false\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/multiagent/chat",
+							"host": ["{{base_url}}"],
+							"path": ["multiagent", "chat"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Chat with Session (Streaming)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"question\": \"What are his research interests?\",\n    \"session_id\": \"user_001\",\n    \"stream\": true\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/multiagent/chat",
+							"host": ["{{base_url}}"],
+							"path": ["multiagent", "chat"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Memory Management",
+			"item": [
+				{
+					"name": "Get Session History",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/multiagent/memory/{{session_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["multiagent", "memory", "{{session_id}}"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Clear Session History",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/multiagent/memory/{{session_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["multiagent", "memory", "{{session_id}}"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Memory Statistics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/multiagent/memory",
+							"host": ["{{base_url}}"],
+							"path": ["multiagent", "memory"]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Admin - Vector Stores",
+			"item": [
+				{
+					"name": "Get System Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/admin/system/info",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "system", "info"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get All Stores Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/admin/vector-stores",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "vector-stores"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Get Specific Store Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/admin/vector-stores/general",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "vector-stores", "general"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Create Vector Store",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"force\": true\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/admin/vector-stores/general/create",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "vector-stores", "general", "create"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Refresh Vector Stores",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"store_types\": [\n        \"general\",\n        \"faculty\"\n    ]\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/admin/vector-stores/refresh",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "vector-stores", "refresh"]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Batch Create Stores",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"action\": \"create\",\n    \"store_types\": [\n        \"general\",\n        \"faculty\",\n        \"degree_programs\"\n    ],\n    \"force\": true\n}",
+							"options": { "raw": { "language": "json" } }
+						},
+						"url": {
+							"raw": "{{base_url}}/admin/vector-stores/batch",
+							"host": ["{{base_url}}"],
+							"path": ["admin", "vector-stores", "batch"]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": { "type": "text/javascript", "exec": [""] }
+		},
+		{ "listen": "test", "script": { "type": "text/javascript", "exec": [""] } }
+	],
+	"variable": [
+		{ "key": "base_url", "value": "http://localhost:8000", "type": "string" },
+		{ "key": "session_id", "value": "demo_session_001", "type": "string" },
+		{ "key": "auth_token", "value": "", "type": "string" },
+		{ "key": "user_id", "value": "", "type": "string" }
+	]
+}
