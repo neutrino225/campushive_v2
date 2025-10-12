@@ -12,11 +12,11 @@ from pathlib import Path
 from config import llm
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Union
 
 class Question(BaseModel):
     question_text: str = Field(description="The full text of the question")
-    marks: Optional[int] = Field(description="Marks allocated to the question")
+    marks: Optional[Union[int, str]] = Field(description="Marks allocated to the question (integer preferred; may be string like '5' or '5 marks')")
     difficulty: Optional[str] = Field(description="Estimated difficulty (e.g., Easy, Medium, Hard)")
     topic: Optional[str] = Field(description="The primary topic of the question")
 
@@ -44,7 +44,18 @@ class ExamAnalyzer:
     def analyze_exam(self, raw_text: str, course_name: str) -> Optional[StructuredExam]:
         """Analyzes raw exam text to extract structured data."""
         try:
-            return self.structured_llm.invoke({"exam_text": raw_text, "course_name": course_name})
+            result = self.structured_llm.invoke({"exam_text": raw_text, "course_name": course_name})
+            # Normalize marks: coerce strings like "5" or "5 marks" to int when possible
+            for q in result.questions:
+                if isinstance(q.marks, str):
+                    import re
+                    m = re.search(r"\d+", q.marks)
+                    if m:
+                        try:
+                            q.marks = int(m.group(0))
+                        except Exception:
+                            pass
+            return result
         except Exception as e:
             print(f"Error analyzing exam for course {course_name}: {e}")
             return None
@@ -57,9 +68,14 @@ class ExamParser:
         """Extracts text from a single PDF file."""
         try:
             doc = fitz.open(pdf_path)
-            text = ""
-            for page in doc:
-                text += page.get_text()
+            try:
+                text = "".join(page.get_text() for page in doc)
+            finally:
+                doc.close()
+            # Normalize whitespace and limit size to keep LLM prompt reasonable
+            text = text.replace("\x00", "").strip()
+            if len(text) > 20000:
+                text = text[:20000]
             return text
         except Exception as e:
             print(f"Error reading {pdf_path}: {e}")

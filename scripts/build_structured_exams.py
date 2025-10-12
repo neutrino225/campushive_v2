@@ -1,10 +1,14 @@
 import os
 import json
 from pathlib import Path
+import sys
+
+# Ensure project root is on sys.path for package imports
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from multiagent.parsers.exam_parser import ExamParser, ExamAnalyzer
-
-ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 EXAMS_DIR = DATA_DIR / "exams"
 STRUCTURED_PATH = DATA_DIR / "structured_exams.json"
