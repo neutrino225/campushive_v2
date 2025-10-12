@@ -623,6 +623,37 @@ class VectorStoreManager:
         )
         
         return ensemble_retriever
+
+    def add_documents_to_store(self, store_type: VectorStoreType, documents: List[Document]) -> int:
+        """Add documents to an existing vector store, creating it if needed.
+
+        Returns the number of chunks added.
+        """
+        config = self.configs[store_type]
+
+        # Ensure vector store exists
+        vector_store = self.get_vector_store(store_type)
+        if vector_store is None:
+            vector_store = self.create_vector_store(store_type)
+
+        # Split incoming documents using configured splitter
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.chunk_size,
+            chunk_overlap=config.chunk_overlap,
+            separators=["\n\n", "\n", ". ", " "]
+        )
+        split_docs = text_splitter.split_documents(documents)
+
+        # Add to store and persist
+        vector_store.add_documents(split_docs)
+
+        try:
+            # Chroma persists automatically on add in most cases; ensure flush by reloading
+            _ = self.get_vector_store(store_type)
+        except Exception:
+            pass
+
+        return len(split_docs)
     
     def refresh_data(self, store_types: Optional[List[VectorStoreType]] = None) -> Dict[VectorStoreType, bool]:
         """Refresh vector stores by running scrapers and rebuilding stores.

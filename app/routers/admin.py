@@ -7,7 +7,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Depends, UploadFile, File, Form
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
 
@@ -16,8 +16,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 from vector_store_manager import VectorStoreManager, VectorStoreType
 from config import embeddings
-from app.database import get_db, User
+from app.database import get_db, User, UploadedExam
 from app.auth.dependencies import require_admin
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # Configure logging
 logging.basicConfig(
@@ -106,6 +107,20 @@ class OperationResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class UploadedExamResponse(BaseModel):
+    id: int
+    filename: str
+    course_name: str
+    exam_type: str
+    uploaded_by: int
+    uploaded_at: datetime
+    status: str
+    file_path: str
+
+    class Config:
+        from_attributes = True
+
+
 class BatchOperationResponse(BaseModel):
     """Response model for batch operations."""
     overall_success: bool
@@ -131,6 +146,121 @@ def get_vector_manager() -> VectorStoreManager:
                 detail="Vector Store Manager not initialized"
             )
     return vector_manager
+
+
+def _save_upload_to_disk(base_dir: str, course_name: str, exam_type: str, file: UploadFile) -> str:
+    """Save uploaded file to disk and return file path."""
+    os.makedirs(os.path.join(base_dir, course_name), exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_course = course_name.replace("/", "-").strip()
+    safe_type = exam_type.replace("/", "-").strip()
+    filename = f"{safe_course}_{safe_type}_{ts}.pdf"
+    dest_path = os.path.join(base_dir, safe_course, filename)
+    with open(dest_path, "wb") as out:
+        out.write(file.file.read())
+    return dest_path
+
+
+@router.post("/exams/upload", response_model=OperationResponse)
+async def upload_exam(
+    background_tasks: BackgroundTasks,
+    course_name: str = Form(...),
+    exam_type: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin),
+):
+    """Upload an exam PDF for a course; enqueue processing and tracking."""
+    try:
+        # Basic validations
+        if not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files are allowed")
+
+        # Save to disk
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "exams"))
+        dest_path = _save_upload_to_disk(base_dir, course_name, exam_type, file)
+
+        # Create DB record with processing status
+        record = UploadedExam(
+            filename=os.path.basename(dest_path),
+            course_name=course_name,
+            exam_type=exam_type,
+            uploaded_by=current_user.id,
+            status="processing",
+            file_path=dest_path,
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+
+        # Background processing: parse, update structured_exams.json, add to vector store (centralized)
+        def process_upload(upload_id: int, path: str, course: str, e_type: str):
+            try:
+                # Use centralized utils for parsing and conversion
+                from app.utils.exams import (
+                    analyze_pdf_to_structured,
+                    structured_exam_to_documents,
+                    append_structured_exam_to_json,
+                )
+
+                structured = analyze_pdf_to_structured(path, course)
+                if structured is None:
+                    raise RuntimeError("Exam analysis failed")
+
+                # Append to structured exams JSON
+                struct_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "structured_exams.json"))
+                append_structured_exam_to_json(structured, struct_path)
+
+                # Convert to Documents
+                docs = structured_exam_to_documents(structured, path)
+
+                # Centralized add via manager
+                manager.add_documents_to_store(VectorStoreType.EXAMS, docs)
+
+                # Mark processed
+                with next(get_db()) as session:
+                    rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
+                    if rec:
+                        rec.status = "processed"
+                        session.commit()
+            except Exception:
+                # Mark failed
+                with next(get_db()) as session:
+                    rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
+                    if rec:
+                        rec.status = "failed"
+                        session.commit()
+
+        await asyncio.get_event_loop().run_in_executor(
+            executor,
+            process_upload,
+            record.id,
+            dest_path,
+            course_name,
+            exam_type,
+        )
+
+        return OperationResponse(
+            success=True,
+            message="Upload accepted and processing started",
+            data={"upload_id": record.id}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading exam: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload exam")
+
+
+@router.get("/exams/list", response_model=List[UploadedExamResponse])
+async def list_uploaded_exams(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """List uploaded exams for admin tracking."""
+    rows = db.query(UploadedExam).order_by(UploadedExam.uploaded_at.desc()).all()
+    return [UploadedExamResponse.model_validate(r) for r in rows]
 
 
 # Health check endpoints

@@ -18,6 +18,7 @@ class User(Base):
 
     # Relationships
     chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
+    uploaded_exams = relationship("UploadedExam", back_populates="uploader", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<User(id={self.id}, username={self.username}, role={self.role})>"
@@ -58,3 +59,26 @@ class ChatMessage(Base):
 
     def __repr__(self):
         return f"<ChatMessage(id={self.id}, session_id={self.session_id}, type={self.message_type})>"
+
+
+class UploadedExam(Base):
+    """Track admin-uploaded exams for processing and audit."""
+    __tablename__ = "uploaded_exams"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    filename = Column(String(255), nullable=False)
+    course_name = Column(String(255), nullable=False)
+    exam_type = Column(String(100), nullable=False)
+    uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
+    status = Column(String(50), nullable=False, default="processing")  # processing | processed | failed
+    file_path = Column(String(1024), nullable=False)
+
+    # Relationships
+    uploader = relationship("User", back_populates="uploaded_exams")
+
+    def __repr__(self):
+        return (
+            f"<UploadedExam(id={self.id}, course={self.course_name}, type={self.exam_type}, "
+            f"status={self.status}, filename={self.filename})>"
+        )
