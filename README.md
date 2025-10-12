@@ -84,6 +84,21 @@ Testing
 pytest -q
 ```
 
+## Exam/Quiz Generator (Debug Script)
+
+A dedicated CLI is available to generate exams or quizzes with pretty streaming output and optional diagnostics:
+
+```bash
+scripts/exam_cli.py --query "Generate a final exam for Data Structures (100 marks) focusing on trees and graphs" --role faculty
+```
+
+Options:
+
+- --query / -q: Natural language request (required)
+- --role / -r: student | faculty (default: student)
+- --session / -s: Custom session id (optional)
+- --verbose / -v: Show extra routing and timing info
+
 Repository layout (top-level)
 
 - `app/` — FastAPI application with authentication and chat management
@@ -98,6 +113,10 @@ Repository layout (top-level)
 - `scripts/` — utility scripts (init_db, create_admin, tests)
 - `vector_store_manager.py` — building and managing vector stores
 - `config.py` — LLM and embeddings configuration
+
+More docs
+
+- Exam Agent end-to-end: [README/README_exam_agent.md](README/README_exam_agent.md)
 
 ## 🔐 Authentication System
 

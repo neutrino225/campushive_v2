@@ -108,6 +108,15 @@ def export_timetable() -> bool:
         return False
 
 
+def export_exam() -> bool:
+    try:
+        from multiagent.graph.supervisor import supervisor_graph
+        return _write_png(supervisor_graph, IMAGES_DIR / "exam_graph.png", "exam graph")
+    except Exception as e:
+        print(f"[FAIL] exam graph: {e}")
+        return False
+
+
 def main():
     print("Exporting graphs and faculty tools...\n")
     results: Dict[str, bool] = {}
@@ -116,6 +125,7 @@ def main():
     results["faculty"] = export_faculty()
     results["timetable"] = export_timetable()
     results["faculty_react"] = export_faculty_react()
+    results["exam"] = export_exam()
 
     print("\nSummary:")
     for k, v in results.items():

@@ -5,12 +5,12 @@ from sqlalchemy.orm import Session
 from app.database import get_db, User
 from app.auth.security import decode_access_token
 
-# Security scheme
-security = HTTPBearer()
+# Security scheme with auto_error=False to handle missing auth ourselves
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
     """
@@ -31,6 +31,10 @@ async def get_current_user(
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    
+    # If no credentials provided, return 401
+    if credentials is None:
+        raise credentials_exception
     
     token = credentials.credentials
     payload = decode_access_token(token)

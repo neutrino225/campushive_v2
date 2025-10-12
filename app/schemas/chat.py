@@ -28,11 +28,17 @@ class ChatSessionCreate(BaseModel):
     display_title: str | None = Field(default=None, max_length=150)
 
 
+class ChatSessionUpdate(BaseModel):
+    """Schema for updating a chat session."""
+    session_name: Optional[str] = Field(None, min_length=1, max_length=100)
+
+
 class ChatSessionResponse(BaseModel):
     """Schema for chat session response."""
     id: int
     user_id: int
     session_name: str
+    title: Optional[str] = None  # Alias for session_name for backwards compatibility
     display_title: str | None = None
     created_at: datetime
     updated_at: datetime

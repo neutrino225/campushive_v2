@@ -9,12 +9,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status, Depends
 from pydantic import BaseModel, Field, validator
+from sqlalchemy.orm import Session
 
 # Add root directory to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from vector_store_manager import VectorStoreManager, VectorStoreType
 from config import embeddings
+from app.database import get_db, User
+from app.auth.dependencies import require_admin
 
 # Configure logging
 logging.basicConfig(
@@ -167,7 +170,10 @@ async def vector_stores_health(manager: VectorStoreManager = Depends(get_vector_
 
 # Vector store information endpoints
 @router.get("/vector-stores", response_model=Dict[str, VectorStoreInfo])
-async def get_all_vector_stores(manager: VectorStoreManager = Depends(get_vector_manager)):
+async def get_all_vector_stores(
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
+):
     """Get information about all vector stores."""
     try:
         all_stores = manager.list_all_stores()
@@ -195,7 +201,8 @@ async def get_all_vector_stores(manager: VectorStoreManager = Depends(get_vector
 @router.get("/vector-stores/{store_type}", response_model=VectorStoreInfo)
 async def get_vector_store_info(
     store_type: str,
-    manager: VectorStoreManager = Depends(get_vector_manager)
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
 ):
     """Get information about a specific vector store."""
     try:
@@ -234,7 +241,8 @@ async def create_vector_store(
     store_type: str,
     request: CreateStoreRequest,
     background_tasks: BackgroundTasks,
-    manager: VectorStoreManager = Depends(get_vector_manager)
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
 ):
     """Create or recreate a specific vector store."""
     try:
@@ -274,12 +282,140 @@ async def create_vector_store(
         )
 
 
+@router.post("/vector-stores/{store_type}/rebuild", response_model=OperationResponse)
+async def rebuild_vector_store(
+    store_type: str,
+    background_tasks: BackgroundTasks,
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
+):
+    """Rebuild (recreate) a specific vector store."""
+    try:
+        # Validate store type
+        try:
+            store_enum = VectorStoreType(store_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Vector store type not found: {store_type}"
+            )
+        
+        # Run rebuild in background
+        def rebuild_store():
+            try:
+                manager.create_vector_store(store_enum, force_recreate=True)
+                logger.info(f"Successfully rebuilt vector store: {store_type}")
+            except Exception as e:
+                logger.error(f"Error rebuilding vector store {store_type}: {e}")
+                raise
+        
+        await asyncio.get_event_loop().run_in_executor(executor, rebuild_store)
+        
+        return OperationResponse(
+            success=True,
+            message=f"Vector store '{store_type}' rebuilt successfully"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rebuilding vector store {store_type}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error rebuilding vector store: {str(e)}"
+        )
+
+
+@router.get("/vector-stores/{store_type}/stats", response_model=Dict[str, Any])
+async def get_vector_store_stats(
+    store_type: str,
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
+):
+    """Get statistics for a specific vector store."""
+    try:
+        # Validate store type
+        try:
+            store_enum = VectorStoreType(store_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Vector store type not found: {store_type}"
+            )
+        
+        info = manager.get_store_info(store_enum)
+        
+        return {
+            "store_type": store_type,
+            "exists": info['exists'],
+            "data_source_exists": info['data_source_exists'],
+            "document_count": info.get('document_count', 0),
+            "persist_dir": info['persist_dir'],
+            "data_source": info['data_source']
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting stats for {store_type}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving vector store stats: {str(e)}"
+        )
+
+
+@router.delete("/vector-stores/{store_type}", response_model=OperationResponse)
+async def delete_vector_store(
+    store_type: str,
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
+):
+    """Delete (clear) a specific vector store."""
+    try:
+        # Validate store type
+        try:
+            store_enum = VectorStoreType(store_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Vector store type not found: {store_type}"
+            )
+        
+        # Get persist directory and delete it
+        info = manager.get_store_info(store_enum)
+        persist_dir = info['persist_dir']
+        
+        if info['exists']:
+            import shutil
+            shutil.rmtree(persist_dir)
+            logger.info(f"Successfully deleted vector store: {store_type}")
+            return OperationResponse(
+                success=True,
+                message=f"Vector store '{store_type}' deleted successfully"
+            )
+        else:
+            return OperationResponse(
+                success=True,
+                message=f"Vector store '{store_type}' does not exist, nothing to delete"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting vector store {store_type}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting vector store: {str(e)}"
+        )
+
+
 # Data refresh endpoints
 @router.post("/vector-stores/refresh", response_model=OperationResponse)
 async def refresh_vector_stores(
     request: RefreshDataRequest,
     background_tasks: BackgroundTasks,
-    manager: VectorStoreManager = Depends(get_vector_manager)
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
 ):
     """Refresh vector stores by running scrapers and rebuilding stores."""
     try:
@@ -333,7 +469,8 @@ async def refresh_vector_stores(
 async def batch_operations(
     request: BatchOperationRequest,
     background_tasks: BackgroundTasks,
-    manager: VectorStoreManager = Depends(get_vector_manager)
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
 ):
     """Perform batch operations on multiple vector stores."""
     try:
@@ -400,7 +537,10 @@ async def batch_operations(
 
 # System information endpoints
 @router.get("/system/info", response_model=Dict[str, Any])
-async def get_system_info(manager: VectorStoreManager = Depends(get_vector_manager)):
+async def get_system_info(
+    manager: VectorStoreManager = Depends(get_vector_manager),
+    current_user: User = Depends(require_admin)
+):
     """Get system information and statistics."""
     try:
         all_stores = manager.list_all_stores()

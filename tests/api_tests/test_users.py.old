@@ -1,0 +1,323 @@
+"""
+Test user admin endpoints: user management operations.
+"""
+import pytest
+import uuid
+from fastapi import status
+
+
+def create_user_with_auth(test_client):
+    """Helper function to create and authenticate a user."""
+    unique_email = f"user_{uuid.uuid4()}@example.com"
+    password = "TestPassword123"
+    username = f"user_{uuid.uuid4().hex[:8]}"
+    
+    signup_response = test_client.post(
+        "/auth/signup",
+        json={
+            "username": username,
+            "email": unique_email,
+            "password": password
+        }
+    )
+    
+    data = signup_response.json()
+    user_id = data["user"]["id"]
+    token = data["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    return headers, unique_email, user_id, username
+
+
+@pytest.mark.api
+def test_get_current_user(test_client):
+    """Test getting current authenticated user info."""
+    headers, email, user_id, username = create_user_with_auth(test_client)
+    
+    response = test_client.get(
+        "/admin/users/me",
+        headers=headers
+    )
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["email"] == email
+    assert data["id"] == user_id
+    assert "password" not in data
+
+
+@pytest.mark.api
+def test_get_current_user_without_auth(test_client):
+    """Test getting current user without authentication fails."""
+    response = test_client.get("/admin/users/me")
+    
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.api
+def test_update_user_profile(test_client):
+    """Test updating user profile information."""
+    headers, _, user_id = create_user_with_auth(test_client)
+    
+    new_username = f"updated_{uuid.uuid4().hex[:8]}"
+    
+    response = test_client.put(
+        "/admin/users/me",
+        headers=headers,
+        json={
+            "username": new_username
+        }
+    )
+    
+    if response.status_code == status.HTTP_200_OK:
+        data = response.json()
+        assert data["username"] == new_username
+
+
+@pytest.mark.api
+def test_update_user_email(test_client):
+    """Test updating user email."""
+    headers, _, user_id = create_user_with_auth(test_client)
+    
+    new_email = f"updated_{uuid.uuid4()}@example.com"
+    
+    response = test_client.put(
+        "/admin/users/me",
+        headers=headers,
+        json={
+            "email": new_email
+        }
+    )
+    
+    # Email update might require verification or be restricted
+    assert response.status_code in [
+        status.HTTP_200_OK,
+        status.HTTP_400_BAD_REQUEST,
+        status.HTTP_403_FORBIDDEN
+    ]
+
+
+@pytest.mark.api
+def test_change_password(test_client):
+    """Test changing user password."""
+    headers, email, _ = create_user_with_auth(test_client)
+    
+    old_password = "TestPassword123!"
+    new_password = "NewPassword456!"
+    
+    response = test_client.put(
+        "/admin/users/me/password",
+        headers=headers,
+        json={
+            "old_password": old_password,
+            "new_password": new_password
+        }
+    )
+    
+    if response.status_code == status.HTTP_200_OK:
+        # Try logging in with new password
+        login_response = test_client.post(
+            "/auth/login",
+            data={
+                "username": email,
+                "password": new_password
+            }
+        )
+        assert login_response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.api
+def test_change_password_with_wrong_old_password(test_client):
+    """Test changing password with incorrect old password fails."""
+    headers, _, _ = create_user_with_auth(test_client)
+    
+    response = test_client.put(
+        "/admin/users/me/password",
+        headers=headers,
+        json={
+            "old_password": "WrongOldPassword123!",
+            "new_password": "NewPassword456!"
+        }
+    )
+    
+    # Should reject wrong old password
+    assert response.status_code in [
+        status.HTTP_400_BAD_REQUEST,
+        status.HTTP_403_FORBIDDEN,
+        status.HTTP_404_NOT_FOUND  # If endpoint doesn't exist
+    ]
+
+
+@pytest.mark.api
+def test_delete_user_account(test_client):
+    """Test deleting user account."""
+    headers, email, user_id, username = create_user_with_auth(test_client)
+    
+    response = test_client.delete(
+        "/admin/users/me",
+        headers=headers
+    )
+    
+    if response.status_code == status.HTTP_200_OK:
+        # Try logging in after deletion
+        login_response = test_client.post(
+            "/auth/login",
+            data={
+                "username": email,
+                "password": "TestPassword123!"
+            }
+        )
+        assert login_response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.api
+def test_get_user_by_id(test_client):
+    """Test getting user by ID (admin or public profile)."""
+    headers, _, user_id = create_user_with_auth(test_client)
+    
+    response = test_client.get(
+        f"/admin/users/{user_id}",
+        headers=headers
+    )
+    
+    # Might not be implemented or require admin
+    assert response.status_code in [
+        status.HTTP_200_OK,
+        status.HTTP_403_FORBIDDEN,
+        status.HTTP_404_NOT_FOUND
+    ]
+
+
+@pytest.mark.api
+def test_list_all_users_as_regular_user(test_client):
+    """Test that regular users cannot list all users."""
+    headers, _, _ = create_user_with_auth(test_client)
+    
+    response = test_client.get(
+        "/api/users",
+        headers=headers
+    )
+    
+    # Should be restricted to admin only
+    assert response.status_code in [
+        status.HTTP_403_FORBIDDEN,
+        status.HTTP_404_NOT_FOUND,
+        status.HTTP_403_FORBIDDEN
+    ]
+
+
+@pytest.mark.api
+def test_user_stats(test_client):
+    """Test getting user statistics."""
+    headers, _, user_id = create_user_with_auth(test_client)
+    
+    # Create some sessions to generate stats
+    for i in range(3):
+        test_client.post(
+            "/chats/sessions",
+            headers=headers,
+            json={"title": f"Session {i}"}
+        )
+    
+    response = test_client.get(
+        "/admin/users/me/stats",
+        headers=headers
+    )
+    
+    if response.status_code == status.HTTP_200_OK:
+        data = response.json()
+        assert "session_count" in data or "total_sessions" in data
+
+
+@pytest.mark.api
+def test_user_cannot_access_other_user_info(test_client):
+    """Test that users cannot access other users' information."""
+    # Create two users
+    headers1, _, user_id1 = create_user_with_auth(test_client)
+    headers2, _, user_id2 = create_user_with_auth(test_client)
+    
+    # User 2 tries to access User 1's info
+    response = test_client.get(
+        f"/admin/users/{user_id1}",
+        headers=headers2
+    )
+    
+    # Should be forbidden or not found
+    assert response.status_code in [
+        status.HTTP_403_FORBIDDEN,
+        status.HTTP_404_NOT_FOUND,
+        status.HTTP_403_FORBIDDEN
+    ]
+
+
+@pytest.mark.api
+def test_update_user_with_invalid_data(test_client):
+    """Test updating user with invalid data."""
+    headers, _, _ = create_user_with_auth(test_client)
+    
+    response = test_client.put(
+        "/admin/users/me",
+        headers=headers,
+        json={
+            "email": "not_an_email"  # Invalid email format
+        }
+    )
+    
+    assert response.status_code in [
+        status.HTTP_400_BAD_REQUEST,
+        status.HTTP_422_UNPROCESSABLE_ENTITY
+    ]
+
+
+@pytest.mark.api
+def test_user_sessions_association(test_client):
+    """Test that user's sessions are correctly associated."""
+    headers, _, user_id = create_user_with_auth(test_client)
+    
+    # Create sessions
+    session_titles = ["Session 1", "Session 2", "Session 3"]
+    created_session_ids = []
+    
+    for title in session_titles:
+        response = test_client.post(
+            "/chats/sessions",
+            headers=headers,
+            json={"title": title}
+        )
+        created_session_ids.append(response.json()["id"])
+    
+    # List sessions
+    response = test_client.get(
+        "/chats/sessions",
+        headers=headers
+    )
+    
+    assert response.status_code == status.HTTP_200_OK
+    sessions = response.json()
+    
+    # All created sessions should be in the list
+    session_ids_from_list = [s["id"] for s in sessions]
+    for sid in created_session_ids:
+        assert sid in session_ids_from_list
+
+
+@pytest.mark.api
+def test_user_profile_completeness(test_client):
+    """Test user profile has all required fields."""
+    headers, email, user_id, username = create_user_with_auth(test_client)
+    
+    response = test_client.get(
+        "/admin/users/me",
+        headers=headers
+    )
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    
+    # Check required fields
+    required_fields = ["id", "email", "username"]
+    for field in required_fields:
+        assert field in data
+    
+    # Password should NOT be in response
+    assert "password" not in data

@@ -24,6 +24,7 @@ class VectorStoreType(Enum):
     DEGREE_PROGRAMS = "degree_programs"
     FACULTY = "faculty"
     GENERAL = "general"
+    EXAMS = "exams"
 
 
 @dataclass
@@ -182,6 +183,40 @@ class DegreeDataProcessor(DataProcessor):
                 except:
                     continue
         return total
+
+
+class ExamDataProcessor(DataProcessor):
+    """Processor for structured exam JSON data."""
+
+    @staticmethod
+    def process_data(source_path: str) -> List[Document]:
+        """Process structured exams JSON file into documents."""
+        if not os.path.exists(source_path):
+            raise FileNotFoundError(f"Structured exams file not found: {source_path}")
+
+        with open(source_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        documents = []
+        for exam in data:
+            course = exam.get("course", "Unknown")
+            exam_type = exam.get("exam_type", "Unknown")
+            for question in exam.get("questions", []):
+                content = f"Course: {course}\nExam Type: {exam_type}\n"
+                content += f"Topic: {question.get('topic', 'N/A')}\n"
+                content += f"Question: {question.get('question_text', '')}\n"
+                content += f"Marks: {question.get('marks', 'N/A')}"
+
+                metadata = {
+                    "source": f"exam:{course}:{exam.get('filename', '')}",
+                    "course": course,
+                    "exam_type": exam_type,
+                    "topic": question.get("topic"),
+                    "difficulty": question.get("difficulty"),
+                    "marks": question.get("marks"),
+                }
+                documents.append(Document(page_content=content, metadata=metadata))
+        return documents
 
 
 class FacultyDataProcessor(DataProcessor):
@@ -379,6 +414,7 @@ class VectorStoreManager:
             VectorStoreType.DEGREE_PROGRAMS: DegreeDataProcessor(),
             VectorStoreType.FACULTY: FacultyDataProcessor(),
             VectorStoreType.GENERAL: GeneralDataProcessor(),
+            VectorStoreType.EXAMS: ExamDataProcessor(),
         }
         
         # Default configurations
@@ -409,11 +445,22 @@ class VectorStoreManager:
                 store_type=VectorStoreType.GENERAL,
                 persist_dir=os.path.join(self.vector_stores_dir, "general"),
                 data_source=os.path.join(base_data_dir, "general", "raw"),
-                chunk_size=800,
+                chunk_size=1500,  # Increased to capture complete procedures
+                chunk_overlap=300,  # Increased overlap to ensure continuity
+                bm25_k=20,  # Retrieve more documents for better coverage
+                embed_k=20,  # Retrieve more documents for better coverage
+                mmr_k=20,  # Retrieve more documents for better coverage
+                ensemble_weights=(0.5, 0.3, 0.2)
+            ),
+            VectorStoreType.EXAMS: VectorStoreConfig(
+                store_type=VectorStoreType.EXAMS,
+                persist_dir=os.path.join(self.vector_stores_dir, "exams"),
+                data_source=os.path.join(base_data_dir, "structured_exams.json"),
+                chunk_size=500,
                 chunk_overlap=100,
-                bm25_k=15,
-                embed_k=15,
-                mmr_k=15,
+                bm25_k=20,
+                embed_k=20,
+                mmr_k=20,
                 ensemble_weights=(0.5, 0.3, 0.2)
             )
         }
@@ -469,11 +516,22 @@ class VectorStoreManager:
         # logger.info(f"Split into {len(split_docs)} chunks")
         
         # Create vector store
-        vector_store = Chroma.from_documents(
-            split_docs,
-            self.embeddings,
-            persist_directory=config.persist_dir
-        )
+        try:
+            vector_store = Chroma.from_documents(
+                split_docs,
+                self.embeddings,
+                persist_directory=config.persist_dir
+            )
+        except Exception as e:
+            # Some environments may keep a read-only lock on DuckDB/Parquet files between tests.
+            # If we hit a read-only database error, fall back to opening the existing store read-only.
+            if "readonly" in str(e).lower():
+                vector_store = Chroma(
+                    persist_directory=config.persist_dir,
+                    embedding_function=self.embeddings,
+                )
+            else:
+                raise
         
         # logger.info(f"Successfully created vector store {store_type.value} with {len(split_docs)} chunks")
         return vector_store

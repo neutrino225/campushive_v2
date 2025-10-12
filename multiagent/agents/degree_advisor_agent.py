@@ -1,7 +1,9 @@
 import sys
 import json
+import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
+from langchain_core.messages import AIMessage
 
 # Add the root directory to the Python path so we can import from root modules
 root_dir = Path(__file__).parent.parent.parent
@@ -16,6 +18,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from config import embeddings, llm
 from vector_store_manager import VectorStoreManager, VectorStoreType
 from multiagent.prompts.degree_advisor import degree_advisor_prompt
+import textwrap
 
 
 class DegreeVectorStore:
@@ -30,16 +33,14 @@ class DegreeVectorStore:
 
 
 class DegreeCatalog:
-    """Direct JSON-backed catalog for degree programs with fast filters.
-
-    Expected file: data/degree_programs/degree_programs.json
-    Each entry should include fields like title, level, field, duration_years, total_credit_hours, admission, etc.
-    """
+    """Enhanced catalog for degree programs with intelligent parsing and indexing."""
 
     def __init__(self, json_path: Optional[Path] = None):
         self.path = json_path or (root_dir / "data" / "degree_programs" / "degree_programs.json")
         self._items: List[Dict[str, Any]] = []
         self._index_by_title: Dict[str, Dict[str, Any]] = {}
+        self._index_by_level: Dict[str, List[Dict[str, Any]]] = {}
+        self._index_by_field: Dict[str, List[Dict[str, Any]]] = {}
         self._load()
 
     def _load(self):
@@ -47,129 +48,436 @@ class DegreeCatalog:
             if self.path.exists():
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                # Normalize to list
                 self._items = data if isinstance(data, list) else data.get("programs", [])
-                # Title index
-                self._index_by_title = {
-                    str(item.get("title", "")).strip().lower(): item for item in self._items
-                }
-        except Exception:
-            # Keep empty on failure; hybrid tools will still use vector search
+                
+                # Build indexes
+                for item in self._items:
+                    # Title index
+                    title = str(item.get("title", "")).strip().lower()
+                    if title:
+                        self._index_by_title[title] = item
+                    
+                    # Level index
+                    level = self._extract_level(item.get("title", ""))
+                    if level:
+                        if level not in self._index_by_level:
+                            self._index_by_level[level] = []
+                        self._index_by_level[level].append(item)
+                    
+                    # Field index
+                    field = self._extract_field(item.get("title", ""))
+                    if field:
+                        if field not in self._index_by_field:
+                            self._index_by_field[field] = []
+                        self._index_by_field[field].append(item)
+        except Exception as e:
+            print(f"Error loading degree catalog: {e}")
             self._items = []
             self._index_by_title = {}
+            self._index_by_level = {}
+            self._index_by_field = {}
 
-    # ---- JSON queries ----
+    def _extract_level(self, title: str) -> str:
+        """Extract degree level from title."""
+        title_lower = title.lower()
+        if "bachelor" in title_lower or "bs" in title_lower or "b.s." in title_lower:
+            return "bachelor"
+        elif "master" in title_lower or "ms" in title_lower or "m.s." in title_lower:
+            return "master"
+        elif "phd" in title_lower or "ph.d." in title_lower or "doctorate" in title_lower:
+            return "phd"
+        return ""
+
+    def _extract_field(self, title: str) -> str:
+        """Extract field of study from title."""
+        # Extract text in parentheses (e.g., "Bachelor of Science (Computer Science)")
+        match = re.search(r'\(([^)]+)\)', title)
+        if match:
+            return match.group(1).strip().lower()
+        
+        # Common field keywords
+        title_lower = title.lower()
+        if "computer science" in title_lower or "cs" in title_lower:
+            return "computer science"
+        elif "software engineering" in title_lower or "se" in title_lower:
+            return "software engineering"
+        elif "artificial intelligence" in title_lower or "ai" in title_lower:
+            return "artificial intelligence"
+        elif "data science" in title_lower or "ds" in title_lower:
+            return "data science"
+        elif "cybersecurity" in title_lower or "cyber" in title_lower:
+            return "cybersecurity"
+        elif "business" in title_lower:
+            return "business"
+        elif "accounting" in title_lower or "finance" in title_lower:
+            return "accounting and finance"
+        elif "analytics" in title_lower:
+            return "business analytics"
+        return ""
+
     def by_field(self, field: str, limit: int = 20) -> List[Dict[str, Any]]:
-        f = (field or "").strip().lower()
-        if not f:
+        """Get programs by field with fuzzy matching."""
+        field_lower = field.strip().lower()
+        if not field_lower:
             return []
-        out = [it for it in self._items if f in str(it.get("field", "")).lower() or f in str(it.get("title", "")).lower()]
-        return out[:limit]
+        
+        results = []
+        # Direct field match
+        if field_lower in self._index_by_field:
+            results.extend(self._index_by_field[field_lower])
+        
+        # Partial field match
+        for f, programs in self._index_by_field.items():
+            if field_lower in f and programs[0] not in results:
+                results.extend(programs)
+        
+        # Also search in titles
+        for item in self._items:
+            if field_lower in str(item.get("title", "")).lower() and item not in results:
+                results.append(item)
+        
+        return results[:limit]
 
     def by_level(self, level: str, limit: int = 30) -> List[Dict[str, Any]]:
-        lv = (level or "").strip().lower()
-        if not lv:
+        """Get programs by level with normalization."""
+        level_lower = level.strip().lower()
+        if not level_lower:
             return []
-        out = [it for it in self._items if lv in str(it.get("level", "")).lower()]
-        return out[:limit]
+        
+        # Normalize level names
+        level_mapping = {
+            "bs": "bachelor", "b.s.": "bachelor", "bachelor's": "bachelor",
+            "ms": "master", "m.s.": "master", "master's": "master",
+            "phd": "phd", "ph.d.": "phd", "doctorate": "phd",
+            "undergraduate": "bachelor", "graduate": "master"
+        }
+        
+        normalized_level = level_mapping.get(level_lower, level_lower)
+        
+        results = []
+        if normalized_level in self._index_by_level:
+            results.extend(self._index_by_level[normalized_level])
+        
+        # Also search in titles for exact matches
+        for item in self._items:
+            if level_lower in str(item.get("title", "")).lower() and item not in results:
+                results.append(item)
+        
+        return results[:limit]
 
     def details(self, title: str) -> Optional[Dict[str, Any]]:
-        t = (title or "").strip().lower()
-        if not t:
+        """Get detailed information about a program."""
+        title_lower = title.strip().lower()
+        if not title_lower:
             return None
-        # exact title first
-        it = self._index_by_title.get(t)
-        if it:
-            return it
-        # fuzzy contains
-        for item in self._items:
-            if t in str(item.get("title", "")).lower():
-                return item
+        
+        # Exact match
+        if title_lower in self._index_by_title:
+            return self._index_by_title[title_lower]
+        
+        # Partial match
+        for t, program in self._index_by_title.items():
+            if title_lower in t or t in title_lower:
+                return program
+        
         return None
 
     def search(self, query: str, limit: int = 30) -> List[Dict[str, Any]]:
-        q = (query or "").strip().lower()
-        if not q:
+        """Search programs by query with relevance ranking."""
+        query_lower = query.strip().lower()
+        if not query_lower:
             return []
-        hits: List[Dict[str, Any]] = []
-        for it in self._items:
-            hay = " ".join(
-                [
-                    str(it.get("title", "")),
-                    str(it.get("field", "")),
-                    str(it.get("level", "")),
-                    str(it.get("summary", "")),
-                    str(it.get("curriculum", "")),
-                    str(it.get("admission", "")),
-                ]
-            ).lower()
-            if q in hay:
-                hits.append(it)
-        return hits[:limit]
+        
+        scored_hits = []
+        for item in self._items:
+            score = 0
+            title = str(item.get("title", "")).lower()
+            
+            # Exact title match
+            if query_lower == title:
+                score += 100
+            elif query_lower in title:
+                score += 50
+            
+            # Field match
+            field = self._extract_field(item.get("title", ""))
+            if query_lower in field:
+                score += 30
+            
+            # Content match
+            content = " ".join([
+                str(item.get("career_opportunities", "")),
+                str(item.get("vision", "")),
+                str(item.get("mission", "")),
+            ]).lower()
+            
+            if query_lower in content:
+                score += 10
+            
+            if score > 0:
+                scored_hits.append((score, item))
+        
+        # Sort by score
+        scored_hits.sort(key=lambda x: x[0], reverse=True)
+        return [item for score, item in scored_hits[:limit]]
+
+    def get_semester_courses(self, title: str, semester: int) -> List[Dict[str, Any]]:
+        """Get courses for a specific semester."""
+        program = self.details(title)
+        if not program or "semesters" not in program:
+            return []
+        
+        semester_key = f"semester_{semester}"
+        return program["semesters"].get(semester_key, [])
+
+
+class UserPreferenceCollector:
+    """Collects and manages user preferences for intelligent recommendations."""
+
+    def __init__(self):
+        self.preferences = {
+            "interests": [],
+            "field": None,
+            "level": None,
+            "career_goals": [],
+            "constraints": [],
+            "current_student": None,
+            "current_program": None,
+            "current_semester": None,
+        }
+        self.conversation_stage = "initial"
+
+    def update(self, key: str, value: Any) -> str:
+        """Update a preference value."""
+        if key == "interests" and isinstance(value, list):
+            self.preferences["interests"].extend([v for v in value if v not in self.preferences["interests"]])
+        elif key == "career_goals" and isinstance(value, list):
+            self.preferences["career_goals"].extend([v for v in value if v not in self.preferences["career_goals"]])
+        elif key == "constraints" and isinstance(value, list):
+            self.preferences["constraints"].extend([v for v in value if v not in self.preferences["constraints"]])
+        else:
+            self.preferences[key] = value
+        return f"Updated {key}: {value}"
+
+    def add_interest(self, interest: str) -> str:
+        """Add an interest to the list."""
+        if interest not in self.preferences["interests"]:
+            self.preferences["interests"].append(interest)
+            return f"Added '{interest}' to your interests."
+        return f"'{interest}' is already noted."
+
+    def set_student_status(self, is_current: bool, program: str = None, semester: int = None) -> str:
+        """Set whether user is a current student."""
+        self.preferences["current_student"] = is_current
+        if is_current:
+            if program:
+                self.preferences["current_program"] = program
+            if semester:
+                self.preferences["current_semester"] = semester
+            self.conversation_stage = "current_student"
+            return f"I understand you're a current student{' in ' + program if program else ''}{' (Semester ' + str(semester) + ')' if semester else ''}."
+        else:
+            self.conversation_stage = "prospective_student"
+            return "I understand you're a prospective student. I'll help you find the right program."
+
+    def should_ask_clarifying_question(self) -> bool:
+        """Determine if we need more information."""
+        if self.preferences["current_student"] is None:
+            return True
+        
+        if self.preferences["current_student"]:
+            # For current students, we need their program
+            return self.preferences["current_program"] is None
+        else:
+            # For prospective students, we need interests and level
+            return not self.preferences["interests"] or not self.preferences["level"]
+
+    def get_next_question(self) -> Optional[str]:
+        """Get the next clarifying question to ask."""
+        if self.preferences["current_student"] is None:
+            return "Are you a current student at FAST-NU Islamabad, or are you a prospective student looking to apply?"
+        
+        if self.preferences["current_student"]:
+            if not self.preferences["current_program"]:
+                return "Which program are you currently enrolled in?"
+            if not self.preferences["current_semester"]:
+                return "Which semester are you currently in?"
+            return None
+        else:
+            if not self.preferences["interests"]:
+                return "What are your main academic interests or areas you'd like to study?"
+            if not self.preferences["level"]:
+                return "What degree level are you looking for? (Bachelor's/BS, Master's/MS, or PhD)"
+            if not self.preferences["career_goals"]:
+                return "What are your career goals after graduation?"
+            return None
+
+
+class DegreeMatcher:
+    """Intelligent matching between user preferences and degree programs."""
+
+    def __init__(self, catalog: DegreeCatalog):
+        self.catalog = catalog
+
+    def calculate_score(self, program: Dict[str, Any], preferences: Dict[str, Any]) -> Tuple[int, List[str]]:
+        """Calculate compatibility score between program and preferences."""
+        score = 0
+        reasons = []
+        
+        title = program.get("title", "").lower()
+        
+        # Interest matching (highest weight)
+        for interest in preferences.get("interests", []):
+            if interest.lower() in title or interest.lower() in str(program.get("career_opportunities", "")).lower():
+                score += 30
+                reasons.append(f"Matches your interest in {interest}")
+        
+        # Field matching
+        if preferences.get("field"):
+            field_in_title = preferences["field"].lower() in title
+            if field_in_title:
+                score += 25
+                reasons.append(f"Matches your field preference: {preferences['field']}")
+        
+        # Level matching
+        if preferences.get("level"):
+            level_match = preferences["level"].lower() in title.lower()
+            if level_match:
+                score += 20
+                reasons.append(f"Matches your {preferences['level']} level preference")
+        
+        # Career goals matching
+        career_opps = str(program.get("career_opportunities", "")).lower()
+        for goal in preferences.get("career_goals", []):
+            if goal.lower() in career_opps:
+                score += 15
+                reasons.append(f"Aligns with your career goal: {goal}")
+        
+        return score, reasons
+
+    def find_best_matches(self, preferences: Dict[str, Any], limit: int = 5) -> List[Dict[str, Any]]:
+        """Find the best matching programs."""
+        candidates = []
+        
+        # Get candidates from catalog
+        if preferences.get("field"):
+            candidates.extend(self.catalog.by_field(preferences["field"], limit=20))
+        
+        if preferences.get("level"):
+            candidates.extend(self.catalog.by_level(preferences["level"], limit=20))
+        
+        for interest in preferences.get("interests", []):
+            candidates.extend(self.catalog.search(interest, limit=10))
+        
+        # Remove duplicates
+        unique_candidates = {p.get("title"): p for p in candidates if p.get("title")}
+        
+        # Score all candidates
+        scored_programs = []
+        for title, program in unique_candidates.items():
+            score, reasons = self.calculate_score(program, preferences)
+            if score > 0:
+                scored_programs.append({
+                    "program": program,
+                    "score": score,
+                    "reasons": reasons
+                })
+        
+        # Sort by score
+        scored_programs.sort(key=lambda x: x["score"], reverse=True)
+        return scored_programs[:limit]
 
 
 def _format_program_line(p: Dict[str, Any]) -> str:
+    """Format a program for list display."""
     title = p.get("title", "Unknown Title")
-    level = p.get("level", "")
-    field = p.get("field", "")
-    duration = p.get("duration_years", p.get("duration", "N/A"))
-    credits = p.get("total_credit_hours", p.get("credits", ""))
+    
+    # Calculate total semesters and credits
+    semesters = len(p.get("semesters", {}))
+    total_credits = 0
+    for sem_courses in p.get("semesters", {}).values():
+        for course in sem_courses:
+            credit_str = course.get("credit_hours", "0+0")
+            try:
+                # Parse "3+1" format
+                parts = credit_str.replace("NC+", "0+").split("+")
+                total_credits += sum(int(x) for x in parts if x.isdigit())
+            except:
+                pass
+    
     tail = []
-    if duration:
-        tail.append(f"{duration} yrs")
-    if credits:
-        tail.append(f"{credits} credits")
+    if semesters:
+        tail.append(f"{semesters} semesters")
+    if total_credits:
+        tail.append(f"{total_credits} credits")
+    
     tail_str = f" ({', '.join(tail)})" if tail else ""
-    lead = f"- {title}"
-    if level or field:
-        lead += f" [{level or 'Level N/A'} | {field or 'Field N/A'}]"
-    return lead + tail_str
+    return f"- {title}{tail_str}"
 
 
 def _format_details(p: Dict[str, Any]) -> str:
+    """Format detailed program information."""
     if not p:
         return "No details available."
+    
     parts = []
-    parts.append(f"Title: {p.get('title', 'N/A')}")
-    parts.append(f"Level: {p.get('level', 'N/A')}")
-    parts.append(f"Field: {p.get('field', 'N/A')}")
-    if p.get("duration_years") or p.get("duration"):
-        parts.append(f"Duration: {p.get('duration_years', p.get('duration', 'N/A'))} years")
-    if p.get("total_credit_hours") or p.get("credits"):
-        parts.append(f"Credit Hours: {p.get('total_credit_hours', p.get('credits', 'N/A'))}")
-    if p.get("admission"):
-        parts.append(f"Admission: {p.get('admission')}")
-    if p.get("curriculum"):
-        parts.append(f"Curriculum: {p.get('curriculum')}")
+    parts.append(f"**{p.get('title', 'N/A')}**\n")
+    
+    if p.get("eligibility"):
+        parts.append(f"**Eligibility:** {p.get('eligibility')}\n")
+    
+    if p.get("vision"):
+        parts.append(f"**Vision:** {p.get('vision')}\n")
+    
+    if p.get("mission"):
+        parts.append(f"**Mission:** {p.get('mission')}\n")
+    
     if p.get("career_opportunities"):
-        parts.append(f"Careers: {p.get('career_opportunities')}")
-    if p.get("specializations"):
-        parts.append(f"Specializations: {p.get('specializations')}")
-    if p.get("tuition"):
-        parts.append(f"Tuition: {p.get('tuition')}")
+        parts.append(f"**Career Opportunities:** {p.get('career_opportunities')}\n")
+    
+    # Program structure
+    semesters = p.get("semesters", {})
+    if semesters:
+        total_semesters = len(semesters)
+        total_credits = 0
+        for sem_courses in semesters.values():
+            for course in sem_courses:
+                credit_str = course.get("credit_hours", "0+0")
+                try:
+                    parts_list = credit_str.replace("NC+", "0+").split("+")
+                    total_credits += sum(int(x) for x in parts_list if x.isdigit())
+                except:
+                    pass
+        
+        parts.append(f"**Program Structure:**")
+        parts.append(f"- Total Semesters: {total_semesters}")
+        parts.append(f"- Total Credit Hours: {total_credits}\n")
+    
+    # PEOs
+    if p.get("peos"):
+        parts.append("**Program Educational Objectives:**")
+        for i, peo in enumerate(p.get("peos", []), 1):
+            parts.append(f"{i}. {peo}")
+        parts.append("")
+    
+    # URL
+    if p.get("url"):
+        parts.append(f"**More Information:** {p.get('url')}")
+    
     return "\n".join(parts)
 
 
 # ---------------- Tool-enabled LangGraph Agent ---------------- #
 
 class DegreeReactAgentBuilder:
-    """Builds a LangGraph ReAct agent for degree advisory with hybrid (JSON + vector) tools.
-
-    Tools:
-      - degree_by_field
-      - degree_by_level
-      - degree_details
-      - degree_compare
-      - degree_recommend
-      - degree_search_semantic
-      - degree_search_hybrid
-      - ask_human (lightweight hook to involve a human when needed)
-    """
+    """Enhanced degree advisor agent with intelligent matching and human-in-the-loop."""
 
     def __init__(self):
         self.catalog = DegreeCatalog()
         self.retriever = DegreeVectorStore().get_retriever(k=20)
-        self.checkpointer = MemorySaver()  # keeps thread memory for human-in-the-loop continuity
+        self.preferences = UserPreferenceCollector()
+        self.matcher = DegreeMatcher(self.catalog)
+        self.checkpointer = MemorySaver()
         self.agent = self._build_agent()
 
     def _wrap(self, fn: Callable[[str], str], name: str, description: str) -> Tool:
@@ -295,85 +603,100 @@ class DegreeReactAgentBuilder:
         return "\n".join(lines)
 
     def _tool_recommend(self, text: str) -> str:
-        # Accept input such as "AI; level=BS" or just "Artificial Intelligence"
-        raw = (text or "").strip()
-        level = ""
-        if ";" in raw and "level=" in raw.lower():
-            try:
-                left, right = raw.split(";", 1)
-                raw = left.strip()
-                kv = right.split("=", 1)
-                if len(kv) == 2 and kv[0].strip().lower() == "level":
-                    level = kv[1].strip()
-            except Exception:
-                pass
-
-        # Detect implicit undergraduate intent from the raw query
-        raw_l = raw.lower()
-        undergrad_intent = False
-        if any(tok in raw_l for tok in ["bachelor", "bs", "bsc", "undergrad", "undergraduate"]):
-            undergrad_intent = True
-            level = level or "BS"
-
-        # JSON search by field/interest words
-        json_hits = self.catalog.search(raw, limit=30)
-        if level:
-            # normalize common short forms
-            lvl_norm = level.strip().lower()
-            if lvl_norm in ("bs", "bsc", "bachelor", "undergrad", "undergraduate"):
-                lvl_norm = "bachelor"
-            json_hits = [h for h in json_hits if lvl_norm in str(h.get("level", "")).lower()]
-        # semantic augment
-        q = f"{raw} career opportunities field study {level}".strip()
-        docs = self.retriever.invoke(q)
-        seen = set([str(p.get("title", "")).lower() for p in json_hits])
-        for d in docs:
-            t = str(d.metadata.get("title", "")).strip()
-            if t and t.lower() not in seen:
-                meta_level = str(d.metadata.get("level", "")).lower()
-                if level:
-                    # only include if matches requested level
-                    if level.strip().lower() not in meta_level and not (undergrad_intent and "bachelor" in meta_level):
-                        continue
-                json_hits.append({
-                    "title": t,
-                    "level": d.metadata.get("level", ""),
-                    "field": d.metadata.get("field", ""),
-                    "duration_years": d.metadata.get("duration_years", ""),
-                })
-                seen.add(t.lower())
-        if not json_hits:
-            return f"No specific recommendations found for '{raw}'. Try a broader term (e.g., technology, business, engineering)."
-        # Rank and format results: prefer exact field matches and shorter duration
-        # Simple ranking heuristic: exact field match first, then level match
-        def score_prog(p):
-            s = 0
-            if raw_l and (raw_l in str(p.get("title", "")).lower() or raw_l in str(p.get("field", "")).lower()):
-                s += 20
-            if level and level.strip().lower() in str(p.get("level", "")).lower():
-                s += 10
-            try:
-                s += 5 / (float(p.get("duration_years") or 4) )
-            except Exception:
-                s += 0
-            return s
-
-        json_hits_sorted = sorted(json_hits, key=score_prog, reverse=True)
-
-        # Choose top 3 primary recommendations and next 3 runner-ups
-        primaries = json_hits_sorted[:3]
-        runners = json_hits_sorted[3:6]
-
-        header = f"Top recommendations for '{raw}'{(' at level ' + level) if level else ''}:\n\n"
-        lines = [header]
-        if primaries:
-            lines.append("Primary recommendations:")
-            lines += [_format_program_line(p) for p in primaries]
-        if runners:
-            lines.append("\nRunner-up options:")
-            lines += [_format_program_line(p) for p in runners]
-
-        lines.append("\nIf you want, I can give more details on any of these programs (courses, admission criteria, career paths).")
+        """Intelligent recommendations based on collected preferences."""
+        # Use matcher to find best programs based on stored preferences
+        matches = self.matcher.find_best_matches(self.preferences.preferences, limit=5)
+        
+        if not matches:
+            return "I need more information about your interests to provide good recommendations. What field or subjects interest you?"
+        
+        lines = ["**Based on your preferences, here are my top recommendations:**\n"]
+        
+        for i, match in enumerate(matches, 1):
+            program = match["program"]
+            score = match["score"]
+            reasons = match["reasons"]
+            
+            lines.append(f"**{i}. {program.get('title', 'Unknown')}** (Match Score: {score})")
+            if reasons:
+                lines.append("   Why this program:")
+                for reason in reasons[:3]:
+                    lines.append(f"   - {reason}")
+            
+            # Add quick summary
+            semesters = len(program.get("semesters", {}))
+            if semesters:
+                lines.append(f"   - Duration: {semesters} semesters")
+            lines.append("")
+        
+        lines.append("Would you like more details about any of these programs?")
+        return "\n".join(lines)
+    
+    def _tool_collect_preferences(self, text: str) -> str:
+        """Collect user preferences from their input."""
+        text_lower = text.lower()
+        
+        # Detect current student status
+        if any(phrase in text_lower for phrase in ["current student", "already enrolled", "studying", "my program"]):
+            # Try to extract program name
+            for title in self.catalog._index_by_title.keys():
+                if title in text_lower:
+                    self.preferences.set_student_status(True, title)
+                    return f"I understand you're a current {title} student. How can I help you with your program?"
+            self.preferences.set_student_status(True)
+            return "I understand you're a current student. Which program are you enrolled in?"
+        
+        # Detect prospective student
+        if any(phrase in text_lower for phrase in ["prospective", "interested in applying", "want to join", "looking for"]):
+            self.preferences.set_student_status(False)
+            return "Great! I'll help you find the right program. What are your main interests?"
+        
+        # Extract level preference
+        for level in ["bachelor", "master", "phd", "bs", "ms", "undergraduate", "graduate"]:
+            if level in text_lower:
+                self.preferences.update("level", level)
+                return f"Noted! You're interested in {level}-level programs."
+        
+        # Extract interests
+        interests = []
+        interest_keywords = ["ai", "artificial intelligence", "machine learning", "data science", 
+                           "computer science", "software engineering", "cybersecurity", "business", 
+                           "finance", "accounting", "analytics"]
+        for keyword in interest_keywords:
+            if keyword in text_lower:
+                interests.append(keyword)
+        
+        if interests:
+            for interest in interests:
+                self.preferences.add_interest(interest)
+            return f"I've noted your interests: {', '.join(interests)}. This will help me recommend suitable programs."
+        
+        return "I've recorded that information. Feel free to share more about your interests or ask for recommendations!"
+    
+    def _tool_semester_courses(self, text: str) -> str:
+        """Get courses for a specific semester of a program."""
+        # Parse input: "program name, semester number"
+        parts = text.split(",")
+        if len(parts) < 2:
+            return "Please provide both program name and semester number (e.g., 'BS Computer Science, 3')"
+        
+        program_title = parts[0].strip()
+        try:
+            semester = int(parts[1].strip())
+        except ValueError:
+            return "Please provide a valid semester number."
+        
+        courses = self.catalog.get_semester_courses(program_title, semester)
+        if not courses:
+            return f"No courses found for {program_title}, Semester {semester}."
+        
+        lines = [f"**{program_title} - Semester {semester} Courses:**\n"]
+        for course in courses:
+            code = course.get("code", "")
+            name = course.get("name", "")
+            credits = course.get("credit_hours", "")
+            lines.append(f"- {code}: {name} ({credits} credit hours)")
+        
         return "\n".join(lines)
 
     def _tool_semantic(self, question: str) -> str:
@@ -398,34 +721,72 @@ class DegreeReactAgentBuilder:
             lines += ["", "Relevant excerpts (semantic):", semantic_blob]
         return "\n".join(lines)
 
-    def _tool_ask_human(self, note: str) -> str:
-        # Lightweight hook: surface a message that upstream UI can detect to prompt a human
-        msg = (note or "").strip() or "Need human input to proceed (clarify preferences, constraints, or compare options)."
-        return f"[HUMAN_NEEDED] {msg}"
-
     def _build_agent(self):
         tools: List[Tool] = [
-            self._wrap(self._tool_by_field, name="degree_by_field", description="List degree programs in a field. Input: field name (e.g., 'Computer Science')."),
-            self._wrap(self._tool_by_level, name="degree_by_level", description="List degree programs by level. Input: level (e.g., 'Bachelor', 'Master', 'PhD', 'BS', 'MS')."),
-            self._wrap(self._tool_details, name="degree_details", description="Get details for a specific program. Input: program title."),
-            self._wrap(self._tool_compare, name="degree_compare", description="Compare two programs. Input: 'Program A vs Program B' or 'Program A | Program B'."),
-            self._wrap(self._tool_recommend, name="degree_recommend", description="Recommend programs for an interest area. Input: e.g., 'Artificial Intelligence; level=BS'."),
-            self._wrap(self._tool_semantic, name="degree_search_semantic", description="Return relevant context via semantic search of the degree corpus. Input: full question."),
-            self._wrap(self._tool_hybrid, name="degree_search_hybrid", description="Hybrid search combining catalog (JSON) matches and semantic excerpts. Input: full question."),
-            self._wrap(self._tool_ask_human, name="ask_human", description="Request human input when preferences/constraints are ambiguous. Input: what to ask the human."),
+            self._wrap(
+                self._tool_by_field,
+                name="list_programs_by_field",
+                description="List all degree programs in a specific field (e.g., 'Computer Science', 'Business', 'AI'). Use this when user asks about programs in a field."
+            ),
+            self._wrap(
+                self._tool_by_level,
+                name="list_programs_by_level",
+                description="List all degree programs at a specific level (e.g., 'Bachelor', 'Master', 'PhD', 'BS', 'MS'). Use when user asks about undergraduate or graduate programs."
+            ),
+            self._wrap(
+                self._tool_details,
+                name="get_program_details",
+                description="Get comprehensive details about a specific degree program including vision, mission, career opportunities, and structure. Input: exact program title."
+            ),
+            self._wrap(
+                self._tool_compare,
+                name="compare_programs",
+                description="Compare two degree programs side-by-side. Input format: 'Program A vs Program B' or 'Program A | Program B'."
+            ),
+            self._wrap(
+                self._tool_recommend,
+                name="recommend_programs",
+                description="Provide intelligent program recommendations based on collected user preferences. Uses stored preferences for personalized suggestions."
+            ),
+            self._wrap(
+                self._tool_collect_preferences,
+                name="collect_user_preferences",
+                description="Collect and store user preferences (interests, level, student status, career goals). Use when user shares information about themselves."
+            ),
+            self._wrap(
+                self._tool_semester_courses,
+                name="get_semester_courses",
+                description="Get list of courses for a specific semester of a program. Input format: 'program name, semester number' (e.g., 'BS Computer Science, 3')."
+            ),
+            self._wrap(
+                self._tool_semantic,
+                name="semantic_search",
+                description="Search degree program corpus using semantic similarity. Use for complex queries or when catalog search doesn't yield results."
+            ),
         ]
 
-        # Instruction prompt for the agent
-        system_prompt = PromptTemplate(
-            input_variables=["context", "question"],
-            template=(
-                f"{degree_advisor_prompt}\n\n"
-                "Use tools liberally to retrieve facts. If uncertain, call 'ask_human' to solicit clarification instead of guessing.\n"
-                "Prefer catalog (JSON) facts when available; verify or enrich with semantic search. Keep answers concise but comprehensive."
-            ),
-        ).template
+        system_prompt = (
+            f"{degree_advisor_prompt}\n\n"
+            "**Your Approach:**\n"
+            "1. When a user first asks about choosing a program, ask them clarifying questions DIRECTLY (don't use a tool for this):\n"
+            "   - Are they a current student or prospective student?\n"
+            "   - If prospective: What are their interests? What level (Bachelor's/Master's/PhD)?\n"
+            "   - If current: What program and semester are they in?\n"
+            "2. Use 'collect_user_preferences' to STORE their responses (not to ask questions)\n"
+            "3. Once you have enough information, use 'recommend_programs' to provide personalized suggestions\n"
+            "4. For current students: Use tools to provide detailed information about their program, courses, and requirements\n"
+            "5. Always use exact program titles when calling tools\n"
+            "6. Provide specific, actionable advice based on official program data\n\n"
+            "**Available Data:**\n"
+            "- Complete semester-wise course breakdown for all programs\n"
+            "- Program eligibility, vision, mission, and career opportunities\n"
+            "- Credit hours and duration information\n"
+            "- Program educational objectives (PEOs) and learning outcomes (PLOs)\n\n"
+            "**Important:** When you need more information from the user, ASK THEM DIRECTLY in your response. "
+            "Don't use a tool to ask questions - just include the question in your natural response to the user. "
+            "Be helpful, accurate, and conversational. Guide users through their decision-making process."
+        )
 
-        # expose the system prompt text so streaming calls can include it as a SystemMessage
         self.system_prompt_text = system_prompt
 
         return create_react_agent(
@@ -438,8 +799,14 @@ class DegreeReactAgentBuilder:
     def get_agent(self):
         return self.agent
 
-    def stream(self, question: str):
-        config = {"configurable": {"thread_id": "degree_react"}}
+    def stream(self, question: str, session_id: str = "default"):
+        """Stream responses for a given question with session-specific conversation history.
+        
+        Args:
+            question: The user's question
+            session_id: Unique session identifier to maintain separate conversation contexts
+        """
+        config = {"configurable": {"thread_id": f"degree_react::{session_id}"}}
         for step in self.agent.stream(
             {"messages": [SystemMessage(content=getattr(self, "system_prompt_text", "")), HumanMessage(content=question)]},
             config,
@@ -501,11 +868,23 @@ def get_degree_advisor_agent() -> DegreeAdvisorAgent:
 
 
 if __name__ == "__main__":
-    # Quick manual test
+    # Quick manual test with pretty printing
+
     builder = DegreeReactAgentBuilder()
-    prompt = "I'm interested in AI and data science at the BS level. What programs do you recommend?"
-    print("=== Degree Advisor ReAct Agent Test ===\n")
-    final = ""
-    for msg in builder.stream(prompt):
-        final = msg
-    print(final)
+    agent = builder.get_agent()
+    test_questions = [
+        "I am a current BS Computer Science student in semester 3. What courses do I need to take next semester?",
+        "Can you recommend some undergraduate programs in AI and Data Science?",
+        "What are the career opportunities for MS Software Engineering graduates?",
+        "Compare BS Computer Science vs BS Software Engineering.",
+        "List all Master's programs available at FAST Islamabad.",
+        "Tell me about the eligibility criteria for the PhD in Computer Science program.",
+        "I am interested in business and finance. Which programs should I consider?",
+    ]
+    
+    for q in test_questions:
+        print(f"\n=== Question: {q} ===")
+        for resp in builder.stream(q):
+            print(resp, end="", flush=True)
+        print("\n" + "="*50 + "\n")
+

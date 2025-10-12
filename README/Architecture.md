@@ -1,166 +1,160 @@
-# Multi‑Agent Architecture (Current State, Recommendations, and Plan)
+# CampusHive System Architecture
 
-This document explains the current multi‑agent architecture in this repository, how the pieces fit together, and concrete next steps to evolve it. It’s written to be practical and implementation‑driven.
+This document provides a comprehensive overview of the CampusHive system architecture, detailing its layered design from the user interface to the intelligent agent core.
 
-## High‑Level Overview
+## 1. High-Level Overview
 
-Goal: Provide a hierarchical assistant with a top‑level supervisor that routes queries to mid‑level domains (student vs faculty), which in turn delegate to specialized sub‑agents (general university RAG, degree advisor, faculty information).
+CampusHive is a hierarchical, multi-agent university assistant built on a modern, decoupled architecture. The system is designed to be modular, scalable, and maintainable.
 
-Core technologies:
+- **Frontend**: A lightweight, single-page web interface for user interaction.
+- **Backend**: A robust FastAPI application serving the API, handling authentication, and managing chat persistence.
+- **Database**: A relational SQLite database for storing user data, chat history, and file metadata.
+- **Intelligence Layer**: A sophisticated multi-agent system orchestrated by LangGraph, responsible for understanding and responding to user queries.
+- **Data & Retrieval Layer**: A hybrid retrieval system combining vector search (RAG) and structured data lookups to provide grounded, accurate answers.
 
-- Orchestration: LangGraph StateGraph
-- LLM + embeddings: configured in `config.py` (Groq Chat model; Ollama embeddings)
-- Retrieval: Central `VectorStoreManager` with Chroma stores for `GENERAL`, `DEGREE_PROGRAMS`, and `FACULTY`, plus BM25 and MMR ensemble
-- Agents: `RAGEngine` (general), `DegreeAdvisorAgent`, `FacultyAgent`
-- Routing: LLM‑based classifiers with keyword fallback in `multiagent/routing/classifiers.py` (in‑memory cache)
-- Tests: `pytest` integration tests for routing and agent behavior
+The diagram below illustrates the primary architectural layers and the flow of information.
 
-## Repository Layout (multi‑agent)
++-------------------------------------------------------------------------------------------------+
+| User Interface |
+| (Frontend: index.html) |
++---------------------------------------------+---------------------------------------------------+
+|
+| (REST API Calls, File Uploads)
+v
++-------------------------------------------------------------------------------------------------+
+| Backend API (FastAPI) |
+| |
+| +------------------------+ +----------------------+ +------------------------------+ |
+| | API Routers |----->| Authentication (JWT) | | File Upload Endpoint | |
+| | (/auth, /chats, /multiagent) | +----------------------+ | (/upload) | |
+| +------------------------+ +--------------+---------------+ |
+| | | |
+| | (Invokes Agent) | (Saves File) | (Writes Metadata)
+| v v v
++----------------------------------+-----------------------------+----------------+----------------+
+| Intelligence Layer | | Persistence Layer |
+| (Multi-Agent Core) | | |
+| | | +---------------------------+ |
+| +----------------------------+ | | | Database (SQLite) | |
+| | Supervisor Graph (LangGraph) | | | | (campushive.db) | |
+| +-------------+--------------+ | | +---------------------------+ |
+| | | | +---------------------------+ |
+| | (Routes to) | | | File Storage | |
+| +------------+-----------+ | | | (data/uploads/) | |
+| v v | | +---------------------------+ |
+| +-----------------+ +-----------------+ | |
+| | Student Subgraph| | Faculty Subgraph| | |
+| +-------+---------+ +--------+--------+ | |
+| | | | |
+| | (Delegates to) | (Delegates to) | |
+| v v | |
+| +------------------------------------------------------------+ | |
+| | Specialized Agents (RAGEngine, DegreeAdvisor, FacultyAgent) | | |
+| +---------------------------------+----------------------------+ | |
+| | | |
+| | (Retrieves from, Uses Context from) | |
+| v | |
++------------------------------------------------------------------+---------------------------------+
+| Data & Retrieval Layer (RAG) |
+| |
+| +--------------------------+ +--------------------------------+ +------------------------------+ |
+| | Vector Store Manager | | Document Parser | | Static Data Sources | |
+| | (ChromaDB) | | (PDF, DOCX, TXT) | | (JSON, MD, CSV) | |
+| +--------------------------+ +--------------------------------+ +------------------------------+ |
+| ^ ^ |
+| | (Retrieves) | (Indexes) |
+| +-------------------------------------------------------------------+ |
++-----------------------------------------------------------------------------------------------------+
 
-- `multiagent/graph/supervisor.py`
-  - Top‑level supervisor graph with an LLM‑based router and nodes for `student`, `faculty`, and `direct` replies
-  - Helper `run_supervisor(question: str) -> str` for easy invocation in tests/CLI
-- `multiagent/nodes/student.py`
-  - Student subgraph: LLM‑routed → `general` (RAGEngine) or `degree` (DegreeAdvisorAgent)
-  - Helper `run_student(question: str) -> str` for deterministic routing in tests
-- `multiagent/nodes/faculty.py`
-  - Thin graph wrapper around `FacultyAgent`, used by the supervisor via `run_faculty` (minimal, single‑node for now)
-- `multiagent/prompts/*.py`
-  - Simple prompt snippets used by nodes/agents
-- `multiagent/tests/test_supervisor.py`
-  - Integration tests for supervisor routing (greeting, faculty email, student general, student degree)
-- `multiagent/tests/test_routing_llm.py`
-  - Unit tests validating deterministic LLM router behavior via mocking
+## 2. Architectural Layers
 
-Related single‑agent modules used by nodes:
+### 2.1. Frontend (UI Layer)
 
-- `general_agent.py` → `RAGEngine`
-- `degree_advisor_agent.py` → `DegreeAdvisorAgent`
-- `faculty_agent.py` → `FacultyAgent` (structured tools + semantic fallback, multi‑person support)
-- `vector_store_manager.py` → Centralized retrievers and data processing for Chroma stores
-- `config.py` → LLM and embeddings
+- **Technology**: Vanilla HTML, CSS, and JavaScript.
+- **Location**: `app/static/index.html`
+- **Functionality**:
+  - Provides the primary chat interface for users.
+  - Handles user authentication state.
+  - Sends user messages to the backend API.
+  - **File Uploads**: Includes a UI component to select local files. On send, it first uploads the file to a dedicated endpoint and then sends the message with a reference to the uploaded file.
 
-## Current Data Flow
+### 2.2. Backend (API & Authentication Layer)
 
-Given a user question:
+- **Technology**: FastAPI
+- **Core Components**:
+  - **API Routers (`app/routers/`)**: Exposes endpoints for authentication (`auth.py`), chat session management (`chats.py`), and agent interaction (`multiagent.py`).
+  - **Authentication (`app/auth/`)**: Implements JWT-based authentication with password hashing (bcrypt). It secures endpoints and manages user roles.
+  - **File Upload Endpoint (`app/routers/chats.py`)**: A dedicated endpoint (`POST /api/v1/chats/{session_id}/upload`) handles multipart file uploads, performs security validation (MIME types), and saves files to a session-specific directory.
 
-1. `run_supervisor(question)` streams the supervisor graph.
-2. Router categorizes the query:
-   - Uses an LLM‑based classifier (`classify_supervisor`) with strict label parsing and keyword fallback.
-   - Greetings/thanks → `direct` node returns a canned response.
-   - Faculty intent → `faculty` path.
-   - Otherwise → `student` path.
-3. Student path:
-   - `student.router` uses an LLM classifier (`classify_student`). If `degree` → call `DegreeAdvisorAgent.invoke`. Else → `RAGEngine.answer`.
-   - Both nodes include fallbacks to ensure non‑empty outputs even if retrieval or LLM fails.
-4. Faculty path (current):
-   - Supervisor calls `run_faculty(question)` which uses a minimal faculty subgraph that wraps `FacultyAgent` (single `faculty_info` node). If needed, it can fall back to streaming `faculty_router_node` to aggregate a result.
-5. Supervisor aggregates the latest `result` seen in the streamed states; if nothing is produced, it returns a helpful fallback based on detected intent.
+### 2.3. Database (Persistence Layer)
 
-## Error Handling and Fallbacks
+- **Technology**: SQLite with SQLAlchemy ORM.
+- **Location**: `data/campushive.db`
+- **Models (`app/database/models.py`)**:
+  - `User`: Stores user credentials and roles.
+  - `ChatSession`: Represents a single conversation.
+  - `ChatMessage`: Stores individual messages within a session.
+  - `UploadedFile`: A new model to track metadata for uploaded files, including filename, server path, and the session it belongs to.
 
-- Student and supervisor nodes catch exceptions and produce deterministic, non‑empty responses.
-- The supervisor adds tailored fallbacks (greeting vs degree vs general) when no node yields a result.
-- `FacultyAgent` internally handles multi‑person queries, structured field tool calls (email, department, publications, etc.), and semantic fallback for summaries.
-- Routers validate LLM outputs against allowed labels; if invalid or on error, they fall back to keyword heuristics.
+### 2.4. Intelligence Layer (Multi-Agent Core)
 
-## Streaming vs Non‑Streaming
+- **Orchestration**: LangGraph (`multiagent/graph/supervisor.py`)
+  - The `SupervisorState` TypedDict defines the shared state that flows through the graph, including the user's question, conversation history, and any file-based context.
+- **Routing**: LLM-based classifiers (`multiagent/routing/classifiers.py`) with keyword-based fallbacks determine the user's intent and route the query to the appropriate subgraph (e.g., `student` or `faculty`).
+- **Agents (`multiagent/agents/`)**:
+  - `RAGEngine`: Handles general knowledge questions using the main university vector store.
+  - `DegreeAdvisorAgent`: Answers queries about degree programs.
+  - `FacultyAgent`: Provides specific information about faculty members using structured tools.
+- **Conversation Memory (`multiagent/memory/manager.py`)**: A thread-safe manager that loads conversation history from the database into a short-term memory for the agents to use, ensuring contextual follow-up answers.
 
-- For reliable tests, the nodes use non‑streaming LLM calls and aggregate results. The supervisor still streams the graph, but we track the latest `result` value and return it.
-- `FacultyAgent`, `RAGEngine`, and `DegreeAdvisorAgent` can stream when used interactively (outside tests).
+### 2.5. Data & Retrieval Layer (RAG)
 
-## Testing Coverage (Current)
+- **Vector Stores (`vector_store_manager.py`)**: A centralized manager for creating and accessing ChromaDB vector stores. It uses a hybrid retrieval strategy (BM25 + Vector Similarity + MMR).
+- **Store Types**: `GENERAL`, `DEGREE_PROGRAMS`, `FACULTY`.
+- **Static Data Sources**: The vector stores are built from curated documents located in `data/general/`, `data/degree_programs/`, and `data/faculty/`.
+- **Document Parsing (`multiagent/utils/document_parser.py`)**: A utility to extract text content from uploaded files (PDF, DOCX, TXT). This allows the system to use user-provided documents as context for a query.
 
-- Single‑agent tests validate `FacultyAgent`, `RAGEngine` (general), and `DegreeAdvisorAgent` behavior.
-- Multi‑agent tests validate supervisor routing for greeting, faculty email, student general, and student degree scenarios.
-- All current tests pass.
-- The router unit tests (`test_routing_llm.py`) verify the LLM classifiers produce the expected labels deterministically under mocking.
+## 3. Core Data Flows
 
-## Known Limitations
+### 3.1. Standard Chat Message
 
-- Routing is LLM‑based with keyword fallback. While more flexible, it still needs evaluation/guardrails for mixed intents and edge cases.
-- Faculty subgraph is minimal (single `faculty_info` node). There’s no intent router inside the faculty path yet (e.g., email vs department vs profile).
-- No persistent memory/checkpointing between turns yet (LangGraph supports this; not wired).
-- No unified structured state across nodes; each node returns simple strings. This keeps things simple but limits richer behaviors (e.g., tool traces, citations, per‑person results as objects).
+1.  **Frontend**: User sends a message. A `POST` request is made to `/api/v1/multiagent/invoke` with the question and session ID.
+2.  **Backend**: The `invoke_multiagent` endpoint authenticates the user and loads the conversation history from the database into the `MemoryManager`.
+3.  **Agent Core**: The supervisor graph is invoked with the user's question and conversation history.
+4.  **Routing**: The supervisor's router classifies the intent and passes the state to a subgraph (e.g., `student_node`).
+5.  **Delegation**: The subgraph's router further refines the intent and delegates to a specialized agent (e.g., `RAGEngine`).
+6.  **Retrieval & Generation**: The agent retrieves relevant information from its vector store, synthesizes an answer with the LLM, and returns the result.
+7.  **Response**: The result propagates back up the graph, is streamed back to the frontend, and the message exchange is saved to the database.
 
-## Recommendations (Short‑Term)
+### 3.2. Chat Message with File Upload
 
-1. Enrich the faculty subgraph with an internal intent router (email, department, designation, profile/summary, publications, etc.) and map to `FacultyAgent` tools.
-2. Add light telemetry around routing decisions (input, label, fallback used) for test visibility and future evaluation.
-3. Keep code simple: prefer plain functions and thin nodes; let agents stay self‑contained while nodes orchestrate.
-4. Add minimal memory only where it pays off (e.g., remember last resolved person across follow‑ups).
+This flow extends the standard flow by injecting file content as context.
 
----
+1.  **Frontend**: User selects a file and types a message. On send:
+    a. A `POST` request containing the file is sent to `/api/v1/chats/{session_id}/upload`.
+    b. The backend saves the file to `data/uploads/<session_id>/` and creates a record in the `UploadedFile` database table, returning a `file_id`.
+    c. A `POST` request is sent to `/api/v1/multiagent/invoke` with the question, session ID, and the new `file_id`.
+2.  **Backend**: The `invoke_multiagent` endpoint receives the `file_id`. It queries the database to find the file's path.
+3.  **Parsing**: It calls `document_parser.parse_document()` to extract the text content from the file.
+4.  **Agent Core**: The supervisor graph is invoked with the standard state **plus** the extracted text in the `file_context` field.
+5.  **Contextual Invocation**: The agent nodes (e.g., `student_node`) check for `file_context`. If present, they prepend the document's content to the user's question, forming an "enhanced question."
+6.  **Response**: The agent processes the enhanced question, using the provided text as primary context. The rest of the flow proceeds as normal.
 
-## Implementation — LLM‑Based Routing (Done)
+## 4. Future Development Plan
 
-We replaced keyword routers with LLM classifiers and kept keyword fallbacks for safety.
+### Enriching the Faculty Path
 
-- Classifiers live in `multiagent/routing/classifiers.py` with in‑memory caching and strict label validation.
-- `supervisor.py` and `student.py` now route via `classify_supervisor` and `classify_student` respectively.
-- Tests include `multiagent/tests/test_routing_llm.py` (mocked labels) and existing end‑to‑end scenarios; all pass.
-- Prompts are terse and deterministic; invalid outputs fall back to keyword heuristics.
+The current faculty subgraph is minimal. The next step is to build it out with a dedicated intent router to handle more specific queries.
 
----
+- **Proposed Graph**:
+  - `faculty_router` (LLM): Classify intent into labels like `email`, `department`, `publications`, `profile`, etc.
+  - `person_resolver` (Function): Extract and resolve person names from the query.
+  - `faculty_tools_node` (Function): Execute the appropriate `FacultyAgent` tool based on the classified intent.
+  - `aggregator` (Function): Format the results into a coherent response.
+- **Goal**: Enable the faculty path to answer multi-intent and multi-person queries robustly, such as "What are the email addresses and departments for Dr. Smith and Professor Jones?"
 
-## Plan — Richer Faculty Path (Extensible Subgraph)
+### Persistent Memory
 
-Current: Supervisor uses `run_faculty` which wraps a minimal faculty subgraph (single `faculty_info` node invoking `FacultyAgent`). Next, enrich this path with intent routing and tool mapping while keeping the implementation small and testable.
-
-### Proposed Graph
-
-- `faculty_router` (LLM): Classify the faculty intent into labels like `email`, `department`, `designation`, `profile`, `publications`, `education`, `experience`, `extension`, `website`, `hec_supervisor`, `multi_person`, or `summary`.
-- `person_resolver` (function): Extract person names from the question and resolve to structured person objects (reuse `FacultyAgent`’s `_find_people_in_query` and name index).
-- `faculty_tools_node` (function): Given intent + people, call the relevant tool(s) on `FacultyAgent` (e.g., `_tool_email`, `_tool_department`, etc.) and aggregate string output. If `summary`/`profile` is requested, call `FacultyAgent._generate_person_summary` or a semantic `answer` path.
-- `aggregator` (function): Build a final string response that includes per‑person results and handles missing data as `N/A`.
-
-This is intentionally small; you can later add more nodes/agents (e.g., separate `PublicationsAgent` or `HECSupervisorsAgent`) and plug them behind the same router.
-
-### Contract
-
-- Input: `question: str`
-- Output: `result: str` (non‑empty), preserving current tests’ expectations (e.g., email presence for “email of …”).
-- Error modes: If LLM or tools fail, return a graceful fallback with what was resolved.
-- Success criteria: Current multi‑agent tests remain green; add a couple of new tests for other intents (department, designation) and multi‑person queries.
-
-### Steps
-
-1. Add an intent classifier inside the faculty subgraph with labels like `email`, `department`, `designation`, `profile`, `publications`, `education`, `experience`, `extension`, `website`, `hec_supervisor`, `multi_person`, `summary`.
-2. Implement `person_resolver` reusing `FacultyAgent` internals to map query → people.
-3. Implement `faculty_tools_node` to dispatch to `FacultyAgent` tool methods per intent; use semantic summary for `profile/summary` intents.
-4. Wire an `aggregator` to format per‑person results and handle missing data as `N/A`.
-5. Tests:
-   - Extend `multiagent/tests/test_supervisor.py` with new cases (department, designation, multi‑person email).
-   - Add `multiagent/tests/test_faculty_graph.py` to unit‑test the faculty subgraph with mocked intent labels.
-
-### Files to add/change
-
-- Update: `multiagent/nodes/faculty.py` (add intent router and tool mapping)
-- Update: `multiagent/graph/supervisor.py` (no change expected beyond wiring already in place)
-- New tests: `multiagent/tests/test_faculty_graph.py`
-
-### Keep It Simple
-
-- Prefer plain functions for intent classification and person resolution.
-- Reuse `FacultyAgent` functions; don’t fork the logic.
-- Return plain strings from nodes to maintain compatibility with existing consumers and tests.
-
----
-
-## Optional: Memory (Later)
-
-- Add a checkpointer and persistent memory to the supervisor graph to track last resolved person(s) and prior intents for follow‑up questions.
-- Start with a minimal dict‑based memory keyed by a session ID; only persist short, structured fields.
-
-## Rollout Strategy
-
-1. LLM routing with strict prompts and fallbacks — Done.
-2. Enrich the faculty subgraph with minimal intents first (email, department, summary), then add more incrementally.
-3. Add memory only if you need multi‑turn continuity.
-
-## Acceptance Criteria (Summary)
-
-- All existing tests remain green.
-- New router classifier tests pass deterministically.
-- Faculty subgraph (enriched) can answer at least: email, department, summary; and supports multi‑person queries.
-- No streaming regressions; non‑empty outputs are guaranteed by fallbacks.
+- **Goal**: Implement checkpointing in the LangGraph supervisor to persist state between turns.
+- **Use Case**: Allow for true multi-turn contextual conversations, such as remembering the last-mentioned faculty member ("What about his publications?").
+- **Implementation**: Utilize a `Checkpointer` (e.g., `LangGraph`'s built-in SQLite checkpointer) connected to the supervisor graph, keyed by session ID.

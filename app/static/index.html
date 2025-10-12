@@ -109,6 +109,11 @@
             color: var(--text-primary);
         }
 
+        .chat-item:hover .chat-delete-btn {
+            opacity: 1;
+            visibility: visible;
+        }
+
         .chat-item.active {
             background: var(--bg-tertiary);
             color: var(--text-primary);
@@ -126,6 +131,34 @@
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+
+        .chat-delete-btn {
+            width: 28px;
+            height: 28px;
+            border: none;
+            background: transparent;
+            color: var(--text-tertiary);
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.15s;
+            flex-shrink: 0;
+        }
+
+        .chat-delete-btn:hover {
+            background: var(--bg-primary);
+            color: #ef4444;
+        }
+
+        .chat-delete-btn svg {
+            width: 14px;
+            height: 14px;
+            opacity: 1;
         }
 
         .sidebar-footer {
@@ -259,7 +292,7 @@
             grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
             gap: 12px;
             margin-top: 24px;
-            max-width: 600px;
+            max-width: 800px;
         }
 
         .suggestion-card {
@@ -286,6 +319,10 @@
         .suggestion-card-desc {
             font-size: 13px;
             color: var(--text-tertiary);
+        }
+
+        .suggestion-card.exam-card {
+            grid-column: span 2;
         }
 
         .message {
@@ -349,18 +386,143 @@
             gap: 8px;
         }
 
+        .route-indicator {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            margin-top: 8px;
+            padding: 6px 10px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .route-indicator-label {
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        .route-step {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .route-arrow {
+            color: var(--text-tertiary);
+            opacity: 0.5;
+        }
+
 
         /* Markdown Styling */
         .markdown {
             font-size: 15px;
+            line-height: 1.6;
+            color: var(--text-primary);
+        }
+
+        .markdown>*:first-child {
+            margin-top: 0 !important;
+        }
+
+        .markdown>*:last-child {
+            margin-bottom: 0 !important;
         }
 
         .markdown p {
-            margin: 12px 0;
+            margin: 16px 0;
+            line-height: 1.6;
         }
 
-        .markdown p:first-child {
-            margin-top: 0;
+        .markdown h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin: 24px 0 16px 0;
+            line-height: 1.3;
+            color: var(--text-primary);
+        }
+
+        .markdown h2 {
+            font-size: 20px;
+            font-weight: 600;
+            margin: 20px 0 12px 0;
+            line-height: 1.3;
+            color: var(--text-primary);
+        }
+
+        .markdown h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 18px 0 10px 0;
+            line-height: 1.3;
+            color: var(--text-primary);
+        }
+
+        .markdown h4 {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 16px 0 8px 0;
+            line-height: 1.3;
+            color: var(--text-primary);
+        }
+
+        .markdown ul,
+        .markdown ol {
+            margin: 16px 0;
+            padding-left: 28px;
+        }
+
+        .markdown ul {
+            list-style-type: disc;
+        }
+
+        .markdown ol {
+            list-style-type: decimal;
+        }
+
+        .markdown li {
+            margin: 8px 0;
+            line-height: 1.6;
+            padding-left: 4px;
+        }
+
+        .markdown li>p {
+            margin: 4px 0;
+        }
+
+        .markdown ul ul,
+        .markdown ol ol,
+        .markdown ul ol,
+        .markdown ol ul {
+            margin: 8px 0;
+        }
+
+        .markdown strong {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .markdown em {
+            font-style: italic;
+        }
+
+        .markdown code {
+            font-family: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .markdown :not(pre)>code {
+            background: var(--bg-tertiary);
+            padding: 3px 6px;
+            border-radius: 4px;
+            color: #f97316;
+            font-size: 13px;
+            border: 1px solid var(--border);
         }
 
         .markdown pre {
@@ -373,53 +535,61 @@
             position: relative;
         }
 
-        .markdown code {
-            font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
-            font-size: 13px;
-        }
-
-        .markdown :not(pre)>code {
-            background: var(--bg-tertiary);
-            padding: 2px 6px;
-            border-radius: 4px;
+        .markdown pre code {
+            background: transparent;
+            padding: 0;
+            border-radius: 0;
             color: var(--text-primary);
+            border: none;
+            display: block;
         }
 
-        .markdown ul,
-        .markdown ol {
-            padding-left: 24px;
-            margin: 12px 0;
+        .markdown blockquote {
+            border-left: 3px solid var(--border);
+            padding-left: 16px;
+            margin: 16px 0;
+            color: var(--text-secondary);
+            font-style: italic;
         }
 
-        .markdown li {
-            margin: 6px 0;
+        .markdown hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 24px 0;
         }
 
-        .markdown h1,
-        .markdown h2,
-        .markdown h3 {
-            margin-top: 24px;
-            margin-bottom: 12px;
+        .markdown a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+
+        .markdown a:hover {
+            text-decoration: underline;
+        }
+
+        .markdown table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 16px 0;
+            overflow: hidden;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+        }
+
+        .markdown th,
+        .markdown td {
+            padding: 10px 12px;
+            text-align: left;
+            border: 1px solid var(--border);
+        }
+
+        .markdown th {
+            background: var(--bg-tertiary);
             font-weight: 600;
         }
 
-        .copy-btn {
-            position: absolute;
-            right: 8px;
-            top: 8px;
-            padding: 6px 12px;
-            background: var(--bg-tertiary);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--text-secondary);
-            font-size: 12px;
-            cursor: pointer;
-            opacity: 0;
-            transition: all 0.2s;
-        }
-
-        .markdown pre:hover .copy-btn {
-            opacity: 1;
+        .markdown tr:nth-child(even) {
+            background: var(--bg-secondary);
         }
 
         .copy-btn:hover {
@@ -855,8 +1025,30 @@
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
                 </svg>
                 <span class="chat-item-title">${chat.display_title || chat.session_name || `Session ${chat.id}`}</span>
+                <button class="chat-delete-btn" title="Delete chat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                </button>
             `;
-            li.addEventListener('click', () => selectSession(chat.session_name, chat.id, li));
+
+            // Add click handler for chat selection (but not on delete button)
+            li.addEventListener('click', (e) => {
+                if (!e.target.closest('.chat-delete-btn')) {
+                    selectSession(chat.session_name, chat.id, li);
+                }
+            });
+
+            // Add delete button handler
+            const deleteBtn = li.querySelector('.chat-delete-btn');
+            deleteBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (confirm('Delete this chat? This action cannot be undone.')) {
+                    await deleteChat(chat.id);
+                }
+            });
+
             chatList.appendChild(li);
         }
 
@@ -872,6 +1064,42 @@
             addChatToList(data);
             selectSession(data.session_name, data.id, chatList.querySelector(`[data-session-id="${data.id}"]`));
             return data;
+        }
+
+        async function deleteChat(sessionId) {
+            try {
+                const r = await fetch(`/chats/${sessionId}`, {
+                    method: 'DELETE',
+                    headers: authHeaders()
+                });
+                if (!r.ok) throw new Error('Failed to delete chat');
+
+                // Remove from UI
+                const li = chatList.querySelector(`[data-session-id="${sessionId}"]`);
+                if (li) li.remove();
+
+                // If this was the current session, clear it and load another or show empty state
+                if (currentSession && currentSession.id === sessionId) {
+                    currentSession = null;
+                    messages.innerHTML = '';
+
+                    // Load the first available chat or show empty state
+                    const firstChat = chatList.querySelector('.chat-item');
+                    if (firstChat) {
+                        const sessionName = firstChat.dataset.sessionName;
+                        const id = parseInt(firstChat.dataset.sessionId);
+                        selectSession(sessionName, id, firstChat);
+                    } else {
+                        showEmptyState();
+                        document.querySelector('.chat-title').textContent = 'CampusHive';
+                    }
+                }
+
+                console.log(`Chat session ${sessionId} deleted successfully`);
+            } catch (e) {
+                console.error('Error deleting chat:', e);
+                alert('Failed to delete chat. Please try again.');
+            }
         }
 
         function selectSession(session_name, id, liEl) {
@@ -914,13 +1142,25 @@
                     <h2>How can I help you today?</h2>
                     <p>Ask me anything about campus life, academics, or student resources</p>
                     <div class="suggestion-cards">
-                        <div class="suggestion-card" data-prompt="What clubs are available on campus?">
-                            <div class="suggestion-card-title">🎯 Campus Life</div>
-                            <div class="suggestion-card-desc">Explore clubs and activities</div>
+                        <div class="suggestion-card" data-prompt="Who is the head of the CS department?">
+                            <div class="suggestion-card-title">Find Faculty</div>
+                            <div class="suggestion-card-desc">e.g., "Who is the head of the CS department?"</div>
                         </div>
-                        <div class="suggestion-card" data-prompt="Help me plan my schedule">
-                            <div class="suggestion-card-title">📚 Academics</div>
-                            <div class="suggestion-card-desc">Get help with course planning</div>
+                        <div class="suggestion-card" data-prompt="What are the requirements for a BS in AI?">
+                            <div class="suggestion-card-title">Explore Degrees</div>
+                            <div class="suggestion-card-desc">e.g., "What are the requirements for a BS in AI?"</div>
+                        </div>
+                        <div class="suggestion-card" data-prompt="What is my class schedule for Monday?">
+                            <div class="suggestion-card-title">Check Timetable</div>
+                            <div class="suggestion-card-desc">e.g., "What is my class schedule for Monday?"</div>
+                        </div>
+                        <div class="suggestion-card" data-prompt="Where is the library located?">
+                            <div class="suggestion-card-title">Ask General Info</div>
+                            <div class="suggestion-card-desc">e.g., "Where is the library located?"</div>
+                        </div>
+                        <div class="suggestion-card exam-card" data-prompt="Generate a final exam for Computer Networks with 5 questions, worth 50 marks.">
+                            <div class="suggestion-card-title">Generate an Exam or Quiz</div>
+                            <div class="suggestion-card-desc">e.g., "Generate a final exam for Computer Networks with 5 questions, worth 50 marks."</div>
                         </div>
                     </div>
                 `;
@@ -988,11 +1228,21 @@
             }
             content.appendChild(messageText);
 
+            // Add route indicator for bot messages
+            let routeIndicator = null;
+            if (role === 'bot') {
+                routeIndicator = document.createElement('div');
+                routeIndicator.className = 'route-indicator';
+                routeIndicator.style.display = 'none'; // Initially hidden
+                routeIndicator.innerHTML = '<span class="route-indicator-label">Route:</span>';
+                content.appendChild(routeIndicator);
+            }
+
             li.appendChild(content);
             messages.appendChild(li);
             li.scrollIntoView({ behavior: 'smooth', block: 'end' });
 
-            return { li, bubble: messageText };
+            return { li, bubble: messageText, routeIndicator };
         }
 
         async function updateMarkdownBubble(bubble, rawText) {
@@ -1052,6 +1302,34 @@
                     }
                 });
                 pre.appendChild(btn);
+            });
+        }
+
+        function updateRouteIndicator(routeIndicator, routeTrail) {
+            if (!routeIndicator || !routeTrail || routeTrail.length === 0) return;
+
+            // Show the indicator
+            routeIndicator.style.display = 'flex';
+
+            // Clear existing content except label
+            const label = routeIndicator.querySelector('.route-indicator-label');
+            routeIndicator.innerHTML = '';
+            if (label) routeIndicator.appendChild(label);
+            else routeIndicator.innerHTML = '<span class="route-indicator-label">Route:</span>';
+
+            // Add route steps
+            routeTrail.forEach((step, index) => {
+                if (index > 0) {
+                    const arrow = document.createElement('span');
+                    arrow.className = 'route-arrow';
+                    arrow.textContent = '→';
+                    routeIndicator.appendChild(arrow);
+                }
+
+                const stepSpan = document.createElement('span');
+                stepSpan.className = 'route-step';
+                stepSpan.textContent = step;
+                routeIndicator.appendChild(stepSpan);
             });
         }
 
@@ -1122,6 +1400,7 @@
                                 if (data.event === 'step') {
                                     if (data.node && !routeTrail.includes(data.node)) {
                                         routeTrail.push(data.node);
+                                        updateRouteIndicator(bot.routeIndicator, routeTrail);
                                     }
                                     continue;
                                 }
@@ -1140,11 +1419,16 @@
                                     partial = mergePartial(partial, data.response);
                                     updateMarkdownBubble(bot.bubble, partial);
                                     if (Array.isArray(data.route) && data.route.length) {
+                                        let routeUpdated = false;
                                         data.route.forEach(node => {
                                             if (!routeTrail.includes(node)) {
                                                 routeTrail.push(node);
+                                                routeUpdated = true;
                                             }
                                         });
+                                        if (routeUpdated) {
+                                            updateRouteIndicator(bot.routeIndicator, routeTrail);
+                                        }
                                     }
                                     continue;
                                 }
@@ -1162,11 +1446,16 @@
                                 partial = mergePartial(partial, wholeJSON.response);
                                 updateMarkdownBubble(bot.bubble, partial);
                                 if (Array.isArray(wholeJSON.route) && wholeJSON.route.length) {
+                                    let routeUpdated = false;
                                     wholeJSON.route.forEach(node => {
                                         if (!routeTrail.includes(node)) {
                                             routeTrail.push(node);
+                                            routeUpdated = true;
                                         }
                                     });
+                                    if (routeUpdated) {
+                                        updateRouteIndicator(bot.routeIndicator, routeTrail);
+                                    }
                                 }
                             }
                             continue;
@@ -1188,17 +1477,27 @@
                                 partial = mergePartial(partial, data.response);
                                 updateMarkdownBubble(bot.bubble, partial);
                                 if (Array.isArray(data.route) && data.route.length) {
+                                    let routeUpdated = false;
                                     data.route.forEach(node => {
                                         if (!routeTrail.includes(node)) {
                                             routeTrail.push(node);
+                                            routeUpdated = true;
                                         }
                                     });
+                                    if (routeUpdated) {
+                                        updateRouteIndicator(bot.routeIndicator, routeTrail);
+                                    }
                                 }
                             }
                         } catch (err) {
                             /* ignore */
                         }
                     }
+                }
+
+                // Final route update after streaming completes
+                if (routeTrail.length > 0 && bot.routeIndicator) {
+                    updateRouteIndicator(bot.routeIndicator, routeTrail);
                 }
 
             } catch (error) {

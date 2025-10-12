@@ -4,7 +4,7 @@ import asyncio
 import json
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -28,8 +28,14 @@ router = APIRouter(
 # Pydantic model for chat requests
 class ChatRequest(BaseModel):
     question: str
-    session_id: str = "default"  # Default session for backwards compatibility
+    session_id: str | int = "default"  # Can be string or int (DB session ID)
     stream: bool = True
+    
+    def get_session_id_str(self) -> str:
+        """Convert session_id to string for internal use."""
+        if isinstance(self.session_id, int):
+            return str(self.session_id)
+        return self.session_id
 
 async def load_history_into_memory(session_id: str, user_id: int, db: Session) -> None:
     """
@@ -106,6 +112,7 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
         initial_state = {
             "question": question,
             "session_id": session_id,
+            "user_role": (current_user.role if current_user is not None else "student"),
             "route": [],
             "result": "",
             "conversation_history": []
@@ -118,7 +125,7 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
                 # The final answer is in the `on_chain_end` event
                 # for the 'student' or 'faculty' nodes
                 node_name = event["name"]
-                if node_name in ["student", "faculty", "direct"]:
+                if node_name in ["student", "faculty", "direct", "exam"]:
                     data = event["data"].get("output")
                     if data and "result" in data:
                         final_state.update(data)
@@ -132,7 +139,7 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
             elif kind == "on_chain_stream":
                 # Stream partial results
                 node_name = event["name"]
-                if node_name in ["student", "faculty", "direct"]:
+                if node_name in ["student", "faculty", "direct", "exam"]:
                     data = event["data"].get("chunk")
                     if data and "result" in data:
                         response_data = {
@@ -144,7 +151,7 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
             elif kind == "on_chain_start":
                 # Yield intermediate steps
                 node_name = event["name"]
-                if node_name in ["student", "faculty", "direct", "router"]:
+                if node_name in ["student", "faculty", "direct", "exam", "router"]:
                      yield f"data: {json.dumps({'event': 'step', 'node': node_name, 'session_id': session_id})}\n\n"
 
             await asyncio.sleep(0.01)  # Prevent blocking
@@ -245,7 +252,26 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
     Handles chat requests, supporting both streaming and non-streaming responses.
     """
     question = request.question
-    session_id = request.session_id
+    session_id = request.get_session_id_str()
+    
+    # If session_id is a numeric string (from integer), verify user owns the session
+    if isinstance(request.session_id, int) or (isinstance(request.session_id, str) and request.session_id.isdigit()):
+        try:
+            session_id_int = int(request.session_id)
+            # Verify the session exists and belongs to the user
+            session = db.query(ChatSession).filter(
+                ChatSession.id == session_id_int,
+                ChatSession.user_id == current_user.id
+            ).first()
+            if not session:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Chat session not found or access denied"
+                )
+            # Use the session_name as the internal session_id
+            session_id = session.session_name
+        except ValueError:
+            pass  # Not a valid integer, treat as regular string session_id
     
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty")
@@ -261,7 +287,7 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
         try:
             # Use the async version directly
             from multiagent.graph.supervisor import run_supervisor_async
-            result = await run_supervisor_async(question, session_id)
+            result = await run_supervisor_async(question, session_id, user_role=(current_user.role if current_user is not None else "student"))
 
             # Persist result to DB (create/find session and store both user and agent messages)
             try:

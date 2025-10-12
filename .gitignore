@@ -68,3 +68,5 @@ Thumbs.db
 # Project-specific data and caches
 data/
 
+# Sensitive files
+USER_CREDENTIALS.md

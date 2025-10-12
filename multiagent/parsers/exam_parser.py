@@ -1,0 +1,94 @@
+import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path for `from config import llm`
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+import fitz  # PyMuPDF
+import os
+from pathlib import Path
+from config import llm
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
+class Question(BaseModel):
+    question_text: str = Field(description="The full text of the question")
+    marks: Optional[int] = Field(description="Marks allocated to the question")
+    difficulty: Optional[str] = Field(description="Estimated difficulty (e.g., Easy, Medium, Hard)")
+    topic: Optional[str] = Field(description="The primary topic of the question")
+
+class StructuredExam(BaseModel):
+    course: str = Field(description="The course name for the exam")
+    exam_type: str = Field(description="The type of exam (e.g., Sessional, Final, Midterm)")
+    questions: List[Question] = Field(description="A list of questions in the exam")
+
+class ExamAnalyzer:
+    def __init__(self):
+        self.llm = llm
+        self.prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are an expert at analyzing exam papers. Your task is to extract structured information from the raw text of an exam. "
+                    "Identify the course, exam type, and all the questions. For each question, extract the question text, marks, estimated difficulty, and topic. "
+                    "Return the information in the specified JSON format.",
+                ),
+                ("human", "Exam Text:\n{exam_text}\n\nCourse: {course_name}"),
+            ]
+        )
+        self.structured_llm = self.prompt | self.llm.with_structured_output(StructuredExam)
+
+    def analyze_exam(self, raw_text: str, course_name: str) -> Optional[StructuredExam]:
+        """Analyzes raw exam text to extract structured data."""
+        try:
+            return self.structured_llm.invoke({"exam_text": raw_text, "course_name": course_name})
+        except Exception as e:
+            print(f"Error analyzing exam for course {course_name}: {e}")
+            return None
+
+class ExamParser:
+    def __init__(self, data_path: str):
+        self.data_path = Path(data_path)
+
+    def extract_text_from_pdf(self, pdf_path: Path) -> str:
+        """Extracts text from a single PDF file."""
+        try:
+            doc = fitz.open(pdf_path)
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            return text
+        except Exception as e:
+            print(f"Error reading {pdf_path}: {e}")
+            return ""
+
+    def process_all_exams(self):
+        """Processes all exam PDFs in the specified directory structure."""
+        analyzer = ExamAnalyzer()
+        structured_exams = []
+        for course_dir in self.data_path.iterdir():
+            if course_dir.is_dir():
+                course_name = course_dir.name
+                for exam_file in course_dir.glob("*.pdf"):
+                    print(f"Processing {exam_file.name} in {course_name}...")
+                    raw_text = self.extract_text_from_pdf(exam_file)
+                    if raw_text:
+                        structured_exam = analyzer.analyze_exam(raw_text, course_name)
+                        if structured_exam:
+                            structured_exams.append(structured_exam)
+        return structured_exams
+
+if __name__ == '__main__':
+    # Example usage:
+    # This assumes the script is run from the root of the project.
+    exams_path = 'data/exams'
+    parser = ExamParser(exams_path)
+    structured_data = parser.process_all_exams()
+    print(f"Successfully structured {len(structured_data)} exams.")
+    # You can now save this structured_data to a JSON file or process it further
+    import json
+    with open('data/structured_exams.json', 'w') as f:
+        json.dump([exam.dict() for exam in structured_data], f, indent=2)

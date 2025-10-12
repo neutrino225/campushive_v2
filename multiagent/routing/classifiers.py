@@ -14,59 +14,73 @@ def _validate_label(label: str, allowed: set[str]) -> str:
         return label
     return None  # Indicates fallback
 
-def classify_supervisor(question: str, llm) -> Literal["student", "faculty", "direct"]:
-    """Classify for supervisor routing with LLM and keyword fallback."""
-    if question in _supervisor_cache:
-        return _supervisor_cache[question]
+def classify_supervisor(question: str, llm, conversation_context: str = "") -> Literal["student", "faculty", "direct", "exam"]:
+    """Classify for supervisor routing with LLM, considering conversation context.
+    
+    Args:
+        question: The user's question
+        llm: The language model to use for classification
+        conversation_context: Recent conversation history for context-aware routing
+    """
     
     prompt = (
         "You are a university assistant router. Classify the user's question into exactly one category:\n"
-        "- 'student': Questions about university information, academics, campus facilities, policies, admissions, courses, degrees, programs, schedules, library, cafeteria, sports, clubs, events, or any university-related services\n"
-        "- 'faculty': Questions about specific professors, lecturers, department heads, faculty contact information, or academic staff\n"
-        "- 'direct': Simple greetings, thanks, basic conversation, or questions that don't require university-specific information\n"
+        "- 'student': Questions requiring NEW information about university, academics, campus facilities, policies, admissions, courses, degrees, programs, schedules, etc.\n"
+        "- 'faculty': Questions requiring NEW information about specific professors, lecturers, department heads, academic staff, OR educational outcome mapping (CLO/PLO mapping)\n"
+        "- 'exam': Questions related to generating exams, quizzes, or practice papers.\n"
+        "- 'direct': Questions that can be answered using EXISTING conversation context (greetings, thanks, follow-ups, reformatting, clarifications)\n"
+        "\n"
+        "IMPORTANT: If there is relevant conversation context and the question is a follow-up, clarification, or reformatting request, choose 'direct'.\n"
+        "IMPORTANT: Questions about CLO (Course Learning Outcomes) or PLO (Program Learning Outcomes) mapping should be routed to 'faculty'.\n"
         "\n"
         "Examples:\n"
-        "- 'What time does the library open?' -> student (library is a university facility)\n"
-        "- 'Who is the head of computer science?' -> faculty\n"
-        "- 'Hello, how are you?' -> direct\n"
-        "- 'What are the admission requirements?' -> student\n"
+        "- 'What time does the library open?' -> student (needs new information)\n"
+        "- 'Who is the head of computer science?' -> faculty (needs new information)\n"
+        "- 'Map CLOs to PLOs' -> faculty (outcome mapping)\n"
+        "- 'Can you help with CLO-PLO alignment?' -> faculty (outcome mapping)\n"
+        "- 'Generate a final exam for Computer Networks' -> exam\n"
+        "- 'Create a quiz for me' -> exam\n"
+        "- 'Hello, how are you?' -> direct (greeting)\n"
+        "- 'Thanks!' -> direct (acknowledgment)\n"
+        "- 'Put that in a table format' -> direct (reformatting existing information)\n"
+        "- 'Can you explain that more?' -> direct (clarification of existing information)\n"
+        "- 'What was my last question?' -> direct (memory query)\n"
         "\n"
-        "Question: {question}\n"
-        "Output exactly one label: student, faculty, or direct. No explanation."
-    ).format(question=question)
+    )
+    
+    if conversation_context:
+        prompt += f"Recent conversation:\n{conversation_context}\n\n"
+    
+    prompt += f"Question: {question}\nOutput exactly one label: student, faculty, direct, or exam. No explanation."
     
     try:
         response = llm.invoke(prompt).content.strip()
-        label = _validate_label(response, {"student", "faculty", "direct"})
+        label = _validate_label(response, {"student", "faculty", "direct", "exam"})
         if label:
-            _supervisor_cache[question] = label
             return label
     except Exception:
         pass  # Fallback to keyword heuristic
     
-    # Keyword-based fallback routing
+    # Minimal keyword-based fallback (only for obvious cases)
     q = question.lower()
+
+    if any(keyword in q for keyword in ["exam", "quiz", "test", "paper", "assessment"]):
+        return "exam"
     
-    # Check for direct/greeting responses
+    # Greetings and thanks
     if any(greeting in q for greeting in ["hi", "hello", "hey", "salam", "assalam", "thanks", "thank you"]):
         return "direct"
     
-    # Leadership/administration roles should go to general university info (student path)
-    if any(keyword in q for keyword in [
-        "rector", "vice chancellor", "vice-chancellor", "vc", "registrar", "chancellor",
-        "controller of examinations", "controller examinations"
-    ]):
-        return "student"
-
-    # Check for faculty-related keywords
-    if any(keyword in q for keyword in ["professor", "prof", "dr", "faculty", "head", "teacher", "instructor", "staff", "department head"]):
+    # OBE/CLO-PLO mapping keywords
+    if any(keyword in q for keyword in ["clo", "plo", "course learning outcome", "program learning outcome", 
+                                         "outcome mapping", "map outcome", "align outcome", "alignment"]):
         return "faculty"
     
-    # Check for university/student-related keywords (broad category)
-    if any(keyword in q for keyword in ["university", "campus", "library", "admission", "degree", "course", "schedule", "fee", "policy", "program", "programme"]):
-        return "student"
+    # Faculty keywords
+    if any(keyword in q for keyword in ["professor", "prof", "dr.", "faculty member", "department head", "lecturer", "instructor"]):
+        return "faculty"
     
-    # Default to student for general university queries
+    # Default to student for university-related queries
     return "student"
 
 def classify_student(question: str, llm) -> Literal["general", "degree", "timetable"]:

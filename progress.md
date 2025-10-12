@@ -1,5 +1,4 @@
 - Working perfectly
-
   - Student queries routing and streaming (supervisor → student)
   - Explore faculty research (Faculty basic + ReAct agent with session-scoped memory)
   - Admin monitoring (admin backend for updating the data is fully functional)
@@ -7,10 +6,9 @@
   - Admissions info: available via degree data, but not FAST-scoped by default
   - Course information: partially via degree/faculty data; needs tighter FAST scoping and coverage
   - Academic schedules: only if your timetable node is wired in this workspace; otherwise pending
-
-- Not implemented here
-  - Auto database update
   - Exam generation
   - CLO–PLO mapping
+
+- Not implemented here
   - PhD compliance
   - Faculty research profile generation

@@ -12,8 +12,8 @@ from langchain.prompts import PromptTemplate
 from langchain_core.messages import HumanMessage
 
 from ..prompts.faculty_router import faculty_router_prompt
-from ..agents.faculty_agent import FacultyAgent
-from ..agents.faculty_react_agent import FacultyReactAgentBuilder
+from ..agents.faculty_react_agent import FacultyAgent, FacultyReactAgentBuilder
+from ..agents.obe_agent.obe_agent import OBEAgent
 from config import llm
 from ..routing.classifiers import classify_faculty
 
@@ -22,11 +22,58 @@ class ConversationState(Dict[str, Any]):
     pass
 
 
-def _route_faculty(state: ConversationState) -> Literal["faculty_info", "done"]:
+def _extract_outcomes(text: str, outcome_type: str) -> list[str]:
+    """Extract CLOs or PLOs from the text.
+    
+    Args:
+        text: The text to extract from
+        outcome_type: Either "clo" or "plo"
+    
+    Returns:
+        List of extracted outcomes
+    """
+    import re
+    
+    outcomes = []
+    outcome_type_upper = outcome_type.upper()
+    
+    # Pattern 1: "CLO 1: description" or "- CLO 1: description"
+    pattern1 = rf"[-•*]?\s*{outcome_type_upper}\s*(\d+)\s*:?\s*(.+?)(?=\n|$)"
+    matches1 = re.finditer(pattern1, text, re.IGNORECASE | re.MULTILINE)
+    for match in matches1:
+        outcomes.append(match.group(2).strip())
+    
+    # Pattern 2: Numbered list after "CLOs:" or "PLOs:" header
+    section_pattern = rf"{outcome_type_upper}s?\s*:?\s*\n((?:[-•*]?\s*.+\n?)+)"
+    section_match = re.search(section_pattern, text, re.IGNORECASE | re.MULTILINE)
+    if section_match:
+        section_text = section_match.group(1)
+        # Extract each line that starts with a bullet or dash
+        line_pattern = r"[-•*]?\s*(.+?)(?=\n|$)"
+        for line_match in re.finditer(line_pattern, section_text, re.MULTILINE):
+            outcome = line_match.group(1).strip()
+            if outcome and not outcome.lower().startswith(('clo', 'plo', 'map', 'these')):
+                # Remove leading "CLO X:" or "PLO X:" if present
+                outcome = re.sub(rf"^{outcome_type_upper}\s*\d+\s*:?\s*", "", outcome, flags=re.IGNORECASE)
+                if outcome and outcome not in outcomes:
+                    outcomes.append(outcome)
+    
+    return outcomes
+
+
+def _route_faculty(state: ConversationState) -> Literal["faculty_info", "obe_mapping", "done"]:
+    """Route faculty questions to either faculty_info or obe_mapping based on keywords."""
     q = (state.get("question") or "").lower()
     if not q.strip():
         return "done"
-    # All faculty questions go to faculty_info since we removed placeholder
+    
+    # Check for OBE-related keywords
+    obe_keywords = ["clo", "plo", "course learning outcome", "program learning outcome", 
+                    "mapping", "map", "outcome", "align", "alignment"]
+    if any(keyword in q for keyword in obe_keywords):
+        return "obe_mapping"
+    
+    # Default to faculty info for all other faculty questions
     return "faculty_info"
 
 
@@ -46,18 +93,67 @@ def build_faculty_graph():
     except Exception:
         react_agent = None
 
+    # Initialize OBE agent instance
+    try:
+        obe_agent = OBEAgent()
+    except Exception:
+        obe_agent = None
+
     # Nodes
     def router_node(state: ConversationState, config: RunnableConfig = None) -> ConversationState:
         # No-op; used only for conditional routing based on question
         return state
 
+    def obe_mapping_node(state: ConversationState, config: RunnableConfig = None) -> ConversationState:
+        """Handle CLO-PLO mapping requests."""
+        question = state.get("question", "")
+        
+        try:
+            if obe_agent is None:
+                return {**state, "result": "OBE mapping service is currently unavailable. Please try again later."}
+            
+            # Try to extract CLOs and PLOs from the question
+            clos = _extract_outcomes(question, "clo")
+            plos = _extract_outcomes(question, "plo")
+            
+            # If we have both CLOs and PLOs, generate the mapping
+            if clos and plos:
+                result = obe_agent.run(clos=clos, plos=plos)
+                return {**state, "result": result}
+            
+            # Otherwise, provide instructions
+            instructions = (
+                "I can help you map Course Learning Outcomes (CLOs) to Program Learning Outcomes (PLOs).\n\n"
+                "To use this feature, please provide:\n"
+                "1. A list of CLOs (Course Learning Outcomes)\n"
+                "2. A list of PLOs (Program Learning Outcomes)\n\n"
+                "I will then generate a mapping table showing which CLOs align with which PLOs, "
+                "along with justifications for each mapping.\n\n"
+                "Example format:\n"
+                "```\n"
+                "Map these outcomes:\n\n"
+                "CLOs:\n"
+                "- CLO 1: Understand basic algorithms\n"
+                "- CLO 2: Implement data structures\n\n"
+                "PLOs:\n"
+                "- PLO 1: Apply knowledge of computing fundamentals\n"
+                "- PLO 2: Design and develop solutions\n"
+                "```"
+            )
+            
+            return {**state, "result": instructions}
+            
+        except Exception as e:
+            return {**state, "result": f"Error processing OBE mapping request: {str(e)}"}
+
     def faculty_info_node(state: ConversationState, config: RunnableConfig = None) -> ConversationState:
         question = state.get("question", "")
+        session_id = state.get("session_id", "default")
         try:
             # Prefer the tool-enabled agent when available for better observability and tools
             if react_agent is not None:
                 final_answer = ""
-                config_dict = {"configurable": {"thread_id": "faculty_react_node"}}
+                config_dict = {"configurable": {"thread_id": f"faculty_react_node::{session_id}"}}
                 for step in react_agent.stream(
                     {"messages": [HumanMessage(content=question)]},
                     config_dict,
@@ -79,13 +175,16 @@ def build_faculty_graph():
 
     graph.add_node("router", router_node)
     graph.add_node("faculty_info", faculty_info_node)
+    graph.add_node("obe_mapping", obe_mapping_node)
 
     graph.set_entry_point("router")
     graph.add_conditional_edges("router", _route_faculty, {
         "faculty_info": "faculty_info",
+        "obe_mapping": "obe_mapping",
         "done": END,
     })
     graph.add_edge("faculty_info", END)
+    graph.add_edge("obe_mapping", END)
 
     return graph.compile()
 

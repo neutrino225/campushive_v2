@@ -262,14 +262,17 @@ class AdvancedUniversityRAGCLI:
         local_prompt = PromptTemplate(
             input_variables=["context", "question"],
             template=(
-                "You are an assistant for a university knowledge base.\n"
-                "Answer ONLY based on the information provided in the context below.\n"
-                "- Do not use outside knowledge.\n"
-                "- If the answer is not explicitly stated in the context, reply exactly with the single token: NOT_FOUND_IN_DOCUMENTS (and nothing else).\n"
-                "- Keep the answer concise and factual.\n\n"
+                "You are an assistant for FAST-NUCES Islamabad university knowledge base.\n\n"
+                "CRITICAL RULES:\n"
+                "1. Answer ONLY using information explicitly stated in the context below\n"
+                "2. Do NOT add details, steps, or information from your training data\n"
+                "3. Do NOT make up URLs, procedures, or requirements\n"
+                "4. When the context contains step-by-step procedures, include ALL steps\n"
+                "5. When the context has detailed information, provide complete details\n"
+                "6. If the answer is not explicitly stated in the context, reply exactly: NOT_FOUND_IN_DOCUMENTS\n\n"
                 "Context:\n{context}\n\n"
-                "Question: {question}\n"
-                "Answer:"
+                "Question: {question}\n\n"
+                "Answer (provide complete information from the context):"
             ),
         )
 

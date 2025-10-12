@@ -19,7 +19,7 @@ def print_welcome_message():
     console.print("Type 'exit' or 'quit' to end the session.")
     console.print("-" * 50)
 
-async def handle_send(question: str, session_id: str = "cli_session"):
+async def handle_send(question: str, session_id: str = "cli_session", debug_graph: bool = False, user_role: str = "student"):
     """Handles sending a question to the supervisor and streaming the response."""
     console.print("\n[bold cyan]CampusHive:[/bold cyan]", end=" ")
     full_response = ""
@@ -34,14 +34,25 @@ async def handle_send(question: str, session_id: str = "cli_session"):
             "session_id": session_id,
             "route": [],
             "result": "",
-            "conversation_history": []
+            "conversation_history": [],
+            "user_role": user_role
         }
         
         async for event in supervisor_graph.astream_events(initial_state, version="v1"):
+            if debug_graph:
+                # Print raw event data for debugging the graph's state transitions
+                console.print(f"[dim]GRAPH EVENT:[/dim] {event}")
+                # If event contains node-local state, pretty print it
+                try:
+                    data = event.get("data") or {}
+                    if data:
+                        console.print(f"[dim] EVENT DATA:[/dim] {data}")
+                except Exception:
+                    pass
             kind = event["event"]
             if kind == "on_chain_end":
                 node_name = event["name"]
-                if node_name in ["student", "faculty", "direct"]:
+                if node_name in ["student", "faculty", "direct", "exam"]:
                     data = event["data"].get("output")
                     if data and "result" in data:
                         full_response = data["result"]
@@ -52,7 +63,7 @@ async def handle_send(question: str, session_id: str = "cli_session"):
                             printed_response = True
             elif kind == "on_chain_start":
                 node_name = event["name"]
-                if node_name in ["student", "faculty", "direct", "router"]:
+                if node_name in ["student", "faculty", "direct", "exam", "router"]:
                     # Only show each node once in the routing display
                     node_key = f"{node_name}"
                     if node_key not in shown_nodes:
@@ -71,7 +82,7 @@ async def handle_send(question: str, session_id: str = "cli_session"):
         console.print(f"\n[bold red]An error occurred:[/bold red] {e}")
 
 
-async def cli_main():
+async def cli_main(debug_graph: bool = False, user_role: str = "student"):
     """
     The main asynchronous loop for the command-line interface.
     """
@@ -81,6 +92,7 @@ async def cli_main():
     import uuid
     session_id = f"cli_{uuid.uuid4().hex[:8]}"
     console.print(f"[dim]Session ID: {session_id}[/dim]")
+    console.print(f"[dim]User Role: {user_role.upper()}[/dim]")
     console.print("[dim]Commands: 'exit' to quit, 'clear' to clear history, 'history' to show conversation[/dim]")
     
     loop = asyncio.get_event_loop()
@@ -120,7 +132,7 @@ async def cli_main():
             if not question.strip():
                 continue
 
-            await handle_send(question, session_id)
+            await handle_send(question, session_id, debug_graph=debug_graph, user_role=user_role)
 
             console.print("-" * 50)
 

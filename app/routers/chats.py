@@ -5,6 +5,7 @@ from typing import List
 from app.database import get_db, User, ChatSession, ChatMessage
 from app.schemas import (
     ChatSessionCreate,
+    ChatSessionUpdate,
     ChatSessionResponse,
     ChatSessionWithMessages,
     ChatMessageCreate,
@@ -98,6 +99,7 @@ async def list_chat_sessions(
             "id": session.id,
             "user_id": session.user_id,
             "session_name": session.session_name,
+            "title": session.session_name,  # Add 'title' field for backwards compatibility
             "display_title": display_title,
             "created_at": session.created_at,
             "updated_at": session.updated_at,
@@ -144,6 +146,7 @@ async def create_chat_session(
     )
 
 
+@router.get("/sessions/{session_id}", response_model=ChatSessionWithMessages)
 @router.get("/{session_id}", response_model=ChatSessionWithMessages)
 async def get_chat_session(
     session_id: int,
@@ -234,7 +237,71 @@ async def add_message_to_session(
     return ChatMessageResponse.model_validate(new_message)
 
 
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.put("/{session_id}", response_model=ChatSessionResponse)
+@router.patch("/{session_id}", response_model=ChatSessionResponse)
+async def update_chat_session(
+    session_id: int,
+    session_data: ChatSessionUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update a chat session's name.
+    
+    Only the session owner can update the session.
+    """
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id,
+        ChatSession.user_id == current_user.id
+    ).first()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat session not found"
+        )
+    
+    # Update session name if provided
+    if session_data.session_name is not None:
+        session.session_name = session_data.session_name
+    
+    # Update timestamp
+    session.updated_at = func.now()
+    
+    db.commit()
+    db.refresh(session)
+    
+    # Get message count
+    message_count = db.query(func.count(ChatMessage.id)).filter(
+        ChatMessage.session_id == session_id
+    ).scalar() or 0
+    
+    # Get display title
+    first_two = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id
+    ).order_by(ChatMessage.created_at.asc()).limit(2).all()
+    first_user = next((m.content for m in first_two if m.message_type == "user"), None)
+    first_agent = next((m.content for m in first_two if m.message_type != "user"), None)
+    display_title = _summarize_title(first_user, first_agent)
+    
+    logger.info(
+        f"User {current_user.username} updated chat session "
+        f"(ID: {session_id}) to '{session.session_name}'"
+    )
+    
+    return ChatSessionResponse(
+        id=session.id,
+        user_id=session.user_id,
+        session_name=session.session_name,
+        title=session.session_name,
+        display_title=display_title,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        message_count=message_count
+    )
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_200_OK)
 async def delete_chat_session(
     session_id: int,
     current_user: User = Depends(get_current_user),
@@ -265,4 +332,4 @@ async def delete_chat_session(
         f"'{session_name}' (ID: {session_id})"
     )
     
-    return None
+    return {"status": "success", "message": "Chat session deleted"}
