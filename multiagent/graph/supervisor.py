@@ -1,578 +1,902 @@
 import sys
-import json
-import re
-import hashlib
 from pathlib import Path
-from typing import Dict, Any, Literal, TypedDict, List, AsyncGenerator, Optional
+from typing import Dict, Any, Literal, List, Annotated
 
-# Add the root directory to the Python path so we can import from root modules
+# Use typing_extensions for Python < 3.12 compatibility
+try:
+    from typing_extensions import TypedDict
+except ImportError:
+    from typing import TypedDict
+
+# Add the root directory to the Python path
 root_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(root_dir))
 
-from langgraph.graph import StateGraph, END
-from langchain_core.runnables import RunnableConfig
+from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.types import Command
+from langgraph.prebuilt import create_react_agent, InjectedState
+from langchain_core.tools import tool, InjectedToolCallId
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-from ..nodes.student import student_router_node, run_student, run_student_streaming, run_general
-from ..agents.faculty_react_agent import FacultyAgent, FacultyReactAgentBuilder
-from ..agents.exam_react_agent import ExamReactAgent  # New simplified agent
+from ..agents.faculty_react_agent import FacultyReactAgentBuilder
+from ..agents.exam_react_agent import ExamReactAgent
 from ..agents.obe_agent.obe_agent import OBEAgent
-from ..routing import classifiers as routing_classifiers
 from ..memory import memory_manager, ConversationTurn
-from config import llm, small_llm
+from config import llm
 
+# New hierarchical supervisors
+from .main_supervisor import build_main_graph as build_main_supervisor_graph
+from .student_supervisor import build_student_graph
+from .faculty_supervisor import build_faculty_graph
+
+
+# ============================================================================
+# State Definition
+# ============================================================================
 
 class SupervisorState(TypedDict):
+    """State for the supervisor graph with delegation."""
     question: str
     result: str
     route: List[str]
     session_id: str
     conversation_history: List[ConversationTurn]
     user_role: str
+    messages: List  # For LangGraph message passing
 
 
-# ---------------- LLM micro-resolver for person disambiguation ----------------
-_person_resolver_cache: Dict[str, Dict[str, str]] = {}
+# ============================================================================
+# Handoff Tools - Core Delegation Mechanism
+# ============================================================================
 
-
-def _make_cache_key(session_id: str, latest_q: str, history: List[ConversationTurn], last_n: int = 3) -> str:
-    segs: List[str] = [session_id or "default", latest_q or ""]
-    recent = history[-last_n:] if history and len(history) > last_n else (history or [])
-    for t in recent:
-        u = getattr(t, "user_message", "") or ""
-        a = getattr(t, "agent_response", "") or ""
-        segs.append(f"U:{u}\nA:{a}")
-    raw = "\n---\n".join(segs)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _parse_json_loose(text: str) -> Dict[str, Any]:
-    """Extract first JSON object from text; tolerate code fences and extra text."""
-    if not text:
-        return {}
-    # Strip fences if present
-    text = text.strip()
-    text = re.sub(r"^```(json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL)
-    # Try direct parse
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    # Fallback: find first {...} block
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            return {}
-    return {}
-
-
-def _validate_email(s: str) -> bool:
-    return bool(re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", s or ""))
-
-
-_SMALL_TALK_MATCHERS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"\b(hi|hello|hey|howdy|salam|assalam(?:ualaikum)?)\b",
-        r"\b(good\s+(morning|afternoon|evening|day))\b",
-        r"\b(bye|goodbye|see you|later)\b",
-        r"\b(thanks|thank\s+you|appreciate\s+it)\b",
-        r"\b(great|awesome|cool|nice)\b\s*(thanks|thank\s+you)?$",
-    ]
-]
-
-_FOLLOW_UP_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"\bwhat about\b",
-        r"\bhow about\b",
-        r"\bwhat else\b",
-        r"\banything else\b",
-        r"\btell me more\b",
-        r"\bcan you (?:explain|elaborate)\b",
-        r"\bmore detail\b",
-        r"\bgive me another\b",
-        r"\bany other\b",
-        r"\bagain\b",
-    ]
-]
-
-_FOLLOW_UP_PRONOUNS = re.compile(r"\b(it|that|this|those|them|they|their|his|her|him)\b", re.IGNORECASE)
-
-
-def _is_small_talk_message(question: str) -> bool:
-    text = (question or "").strip()
-    if not text:
-        return False
-    for matcher in _SMALL_TALK_MATCHERS:
-        if matcher.search(text):
-            return True
-    # Very short acknowledgements like "ok" or "sure"
-    lowered = text.lower()
-    if lowered in {"ok", "okay", "sure", "alright", "sounds good"}:
-        return True
-    return False
-
-
-def _generate_small_talk_reply(question: str) -> str:
-    lowered = (question or "").strip().lower()
-    if not lowered:
-        return "Hi there! How can I help you with CampusHive today?"
-    if re.search(r"\b(hi|hello|hey|howdy|salam|assalam(?:ualaikum)?)\b", lowered):
-        return "Hello! I'm here to help with university questions whenever you're ready."
-    if re.search(r"\bgood\s+(morning|afternoon|evening|day)\b", lowered):
-        return "Good day! Let me know how I can assist you with campus information."
-    if re.search(r"\b(thanks?|thank\s+you|appreciate(?:\s+it)?)\b", lowered):
-        return "You're welcome! Feel free to ask if you need anything else."
-    if re.search(r"\b(bye|goodbye|see you|later)\b", lowered):
-        return "Goodbye! Reach out anytime you have more questions."
-    if lowered in {"ok", "okay", "sure", "alright", "sounds good"}:
-        return "Got it. Let me know if there's anything else you need."
-    return "Happy to help! What would you like to know about next?"
-
-
-def _infer_last_primary_route(history: List[ConversationTurn]) -> Optional[Literal["student", "faculty", "exam"]]:
-    for turn in reversed(history or []):
-        for step in reversed(turn.route or []):
-            if step.endswith("student_agent"):
-                return "student"
-            if step.endswith("faculty_agent") or step.endswith("faculty_react_agent"):
-                return "faculty"
-            if step.endswith("exam_agent") or step.endswith("exam_react_agent"):
-                return "exam"
-    return None
-
-
-def _is_follow_up_question(question: str, history: List[ConversationTurn]) -> bool:
-    text = (question or "").strip()
-    if not text or not history:
-        return False
-    lowered = text.lower()
-    # Pattern-based detection
-    for pattern in _FOLLOW_UP_PATTERNS:
-        if pattern.search(lowered):
-            return True
-    words = lowered.split()
-    if len(words) <= 2 and lowered in {"why", "how", "what", "and?"}:
-        return True
-    if len(words) <= 8 and _FOLLOW_UP_PRONOUNS.search(lowered):
-        return True
-    if lowered.startswith("and ") or lowered.startswith("also "):
-        return True
-    return False
-
-
-def _heuristic_primary_route(question: str) -> Literal["student", "faculty", "exam"]:
-    lowered = (question or "").lower()
-    if any(keyword in lowered for keyword in ["exam", "quiz", "test", "paper", "assessment", "practice"]):
-        return "exam"
-    if any(keyword in lowered for keyword in ["professor", "prof", "dr.", "faculty", "lecturer", "instructor", "advisor", "hod", "head of"]):
-        return "faculty"
-    return "student"
-
-
-def _llm_person_resolver(latest_q: str, history: List[ConversationTurn], session_id: str, last_n: int = 3) -> Dict[str, str]:
-    """Use LLM to resolve the likely person being referred to (by name/email).
-
-    Returns a dict subset of {"person_name": str, "email": str}. Empty dict if not found.
-    Raises on API errors per project conventions.
+def create_handoff_tool(*, agent_name: str, description: str | None = None):
     """
-    cache_key = _make_cache_key(session_id, latest_q, history, last_n=last_n)
-    if cache_key in _person_resolver_cache:
-        return _person_resolver_cache[cache_key]
-
-    # Build compact history context (last n turns)
-    recent = history[-last_n:] if history and len(history) > last_n else (history or [])
-    ctx_lines: List[str] = []
-    for t in recent:
-        if getattr(t, "user_message", None):
-            ctx_lines.append(f"User: {t.user_message}")
-        if getattr(t, "agent_response", None):
-            # Truncate to keep prompt small
-            resp = (t.agent_response or "")[:500]
-            ctx_lines.append(f"Assistant: {resp}")
-    ctx = "\n".join(ctx_lines)
-
-    system_inst = (
-        "You are a strict JSON micro-classifier that identifies the specific faculty person referenced in the user's latest message,"
-        " using only the brief conversation context."
-        " Output ONLY a single JSON object with up to two fields: person_name and email."
-        " If uncertain, output {}. Never invent emails or names."
-    )
-
-    schema_hint = (
-        "Schema: {\"person_name\": string, \"email\": string}. Include a field only if confidently known."
-    )
-
-    user_prompt = (
-        f"Context (last {last_n} turns):\n{ctx}\n\n"
-        f"Latest message: {latest_q}\n\n"
-        f"{schema_hint}"
-    )
-
-    try:
-        from langchain_core.messages import SystemMessage, HumanMessage
-        resp = small_llm.invoke([SystemMessage(content=system_inst), HumanMessage(content=user_prompt)])
-        content = getattr(resp, "content", "")
-        data = _parse_json_loose(content)
-        out: Dict[str, str] = {}
-        if isinstance(data, dict):
-            name = data.get("person_name")
-            email = data.get("email")
-            if isinstance(name, str) and name.strip():
-                out["person_name"] = name.strip()
-            if isinstance(email, str) and _validate_email(email.strip()):
-                out["email"] = email.strip()
-        _person_resolver_cache[cache_key] = out
-        return out
-    except Exception as e:
-        # Re-raise per conventions (no silent fallback on API errors)
-        raise RuntimeError(f"LLM person resolver error: {e}") from e
-
-
-def _route_supervisor(state: SupervisorState) -> Literal["student", "faculty", "direct", "exam", "done"]:
-    q = state.get("question", "")
-    if not q.strip():
-        return "done"
+    Create a handoff tool that the supervisor can use to delegate to a worker agent.
     
-    # Get conversation history for context-aware routing
-    session_id = state.get("session_id", "default")
-    history = state.get("conversation_history", [])
-    route = state.get("route", [])
+    Based on LangGraph's multi-agent supervisor pattern. When the supervisor calls
+    this tool, it hands off control to the specified agent with the full state.
+    
+    Args:
+        agent_name: Name of the agent to transfer to
+        description: Description of what this agent does (shown to supervisor LLM)
+    
+    Returns:
+        A tool function that returns a Command to transfer control
+    """
+    name = f"transfer_to_{agent_name}"
+    description = description or f"Transfer task to {agent_name} agent."
+    
+    # Create a simple tool that doesn't require parameters
+    # The tool will access state through InjectedState at runtime
+    @tool(name, description=description)
+    def handoff_tool() -> str:
+        """Execute the handoff to the target agent."""
+        # This tool just returns a confirmation string
+        # The actual routing happens in the graph via Command
+        return f"Transferring to {agent_name} agent..."
+    
+    # Store metadata for Command generation
+    handoff_tool._agent_name = agent_name
+    
+    return handoff_tool
 
-    if _is_small_talk_message(q):
-        classification: Literal["student", "faculty", "direct", "exam"] = "direct"
-    else:
-        prior_route = _infer_last_primary_route(history)
-        if prior_route and _is_follow_up_question(q, history):
-            classification = prior_route
-        else:
-            conversation_context = ""
-            if history:
-                recent_history = history[-3:] if len(history) > 3 else history
-                context_parts = []
-                for turn in recent_history:
-                    if hasattr(turn, 'user_message') and hasattr(turn, 'agent_response'):
-                        context_parts.append(f"User: {turn.user_message}")
-                        context_parts.append(f"Assistant: {turn.agent_response[:200]}...")
-                conversation_context = "\n".join(context_parts)
-            classification = routing_classifiers.classify_supervisor(q, llm, conversation_context=conversation_context)
-            if classification == "direct":
-                classification = prior_route or _heuristic_primary_route(q)
 
-    state['route'] = route + [f"supervisor:route_to:{classification}"]
-    return classification
-
-
-def build_supervisor_graph():
-    graph = StateGraph(SupervisorState)
-
-    # Nodes
-    async def router_node(state: SupervisorState, config: RunnableConfig = None) -> AsyncGenerator[SupervisorState, None]:
-        # Initialize state with conversation history and routing
-        session_id = state.get("session_id", "default")
-        conversation_history = memory_manager.get_history(session_id)
+def create_task_delegation_handoff_tool(*, agent_name: str, description: str | None = None):
+    """
+    Create a handoff tool with explicit task description delegation.
+    
+    This version lets the supervisor formulate an explicit task for the worker,
+    rather than passing the full conversation history. Useful for complex queries
+    that need to be broken down.
+    
+    Args:
+        agent_name: Name of the agent to transfer to
+        description: Description of what this agent does
+    
+    Returns:
+        A tool function that delegates with a task description
+    """
+    name = f"delegate_task_to_{agent_name}"
+    description = description or f"Delegate a specific task to {agent_name} agent."
+    
+    @tool(name, description=description)
+    def delegation_tool(
+        task_description: Annotated[
+            str,
+            "Clear description of what the agent should do, including all relevant context from the conversation.",
+        ],
+        state: Annotated[SupervisorState, InjectedState],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ) -> Command:
+        """Execute task delegation to target agent."""
+        # Create a focused message for the worker
+        task_message = HumanMessage(content=task_description)
         
+        # Update route
+        updated_route = state.get("route", []) + [f"supervisor:task_delegated_to:{agent_name}"]
+        
+        # Create new state with task as the primary message
+        worker_state = {
+            **state,
+            "question": task_description,  # Override question with task
+            "messages": [task_message],
+            "route": updated_route
+        }
+        
+        return Command(
+            goto=agent_name,
+            update=worker_state,
+            graph=Command.PARENT,
+        )
+    
+    return delegation_tool
+
+
+# ============================================================================
+# Handoff-Back Tool - Workers Return Control to Supervisor
+# ============================================================================
+
+def create_handoff_back_tool():
+    """
+    Create a tool that worker agents can use to return control to the supervisor.
+    
+    This completes the delegation loop - supervisor delegates to worker,
+    worker completes task and hands back to supervisor.
+    """
+    @tool("transfer_back_to_supervisor", "Transfer control back to the supervisor with results.")
+    def handoff_back_tool(
+        state: Annotated[SupervisorState, InjectedState],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ) -> Command:
+        """Return control to supervisor."""
+        tool_message = {
+            "role": "tool",
+            "content": "Successfully transferred back to supervisor",
+            "name": "transfer_back_to_supervisor",
+            "tool_call_id": tool_call_id,
+        }
+        
+        updated_route = state.get("route", []) + ["worker:returned_to_supervisor"]
+        
+        return Command(
+            goto="supervisor",
+            update={
+                **state,
+                "messages": state.get("messages", []) + [tool_message],
+                "route": updated_route
+            },
+            graph=Command.PARENT,
+        )
+    
+    return handoff_back_tool
+
+
+# ============================================================================
+# Supervisor Agent - Central Orchestrator
+# ============================================================================
+
+def create_supervisor_node():
+    """
+    Create a custom supervisor node that routes based on LLM decision.
+    
+    This is simpler than using create_react_agent and avoids the recursion issues.
+    The supervisor makes one LLM call to decide which agent to delegate to,
+    then returns a Command to route to that agent.
+    
+    Returns:
+        An async node function for the supervisor
+    """
+    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+    
+    supervisor_system_prompt = """You are a routing supervisor for a university assistant system.
+
+Your job is to analyze the user's question and decide which specialized agent should handle it.
+
+Available agents:
+- **student**: General student info, degree programs, timetables, academic policies, campus facilities
+- **faculty**: Faculty directory, professor info, contact details, research areas, office hours
+- **exam**: Exam and quiz generation (only for faculty/admin users)
+- **obe**: CLO-PLO mapping and outcome alignment
+- **direct**: Greetings, small talk, acknowledgments, follow-ups, and general conversation
+
+Respond with ONLY the agent name (student, faculty, exam, obe, or direct) and nothing else.
+
+Examples:
+Q: "Who is the rector of FAST?"
+A: faculty
+
+Q: "What degree programs are available?"
+A: student
+
+Q: "Generate an exam for Computer Networks"
+A: exam
+
+Q: "Map CLO1 to PLO2"
+A: obe
+
+Q: "Hello"
+A: direct
+
+Q: "Thank you"
+A: direct
+
+Q: "What can you help me with?"
+A: direct"""
+    
+    async def supervisor_node(state: SupervisorState):
+        """Supervisor node that routes to appropriate worker."""
+        
+        question = state.get("question", "")
+        session_id = state.get("session_id", "default")
+        route = state.get("route", [])
+        
+        # Add conversation context for better routing (especially for follow-up questions)
+        from ..memory import memory_manager
+        context = memory_manager.get_last_context(session_id, last_n=3)
+        question_with_context = f"{context}\n{question}" if context else question
+        
+        # Build messages for LLM
+        messages = [
+            SystemMessage(content=supervisor_system_prompt),
+            HumanMessage(content=f"Question: {question_with_context}")
+        ]
+        
+        # Get LLM decision
+        try:
+            response = await llm.ainvoke(messages)
+            decision = response.content.strip().lower()
+        except Exception as e:
+            decision = "student"  # Default fallback
+        
+        # Validate decision
+        valid_agents = ["student", "faculty", "exam", "obe", "direct"]
+        if decision not in valid_agents:
+            decision = "student"
+        
+        # Update route
+        updated_route = route + [f"supervisor:routed_to:{decision}"]
+        
+        
+        # Return Command to navigate to chosen agent
+        return Command(
+            goto=decision,
+            update={
+                **state,
+                "route": updated_route,
+                "messages": state.get("messages", []) + [
+                    AIMessage(content=f"Routing to {decision} agent", name="supervisor")
+                ]
+            }
+        )
+    
+    return supervisor_node
+
+
+# ============================================================================
+# Worker Agent Nodes
+# ============================================================================
+
+def create_student_supervisor_wrapper_node():
+    """Wrapper that runs the existing compiled student graph and returns state."""
+    from ..nodes.student import student_router_node
+
+    async def student_wrapper(state: SupervisorState):
+        from ..nodes.student import run_student_streaming
+
+        question = state.get("question", "")
+        session_id = state.get("session_id", "default")
+        route = state.get("route", [])
+
+        # Optional: include recent context to improve routing
+        context = memory_manager.get_last_context(session_id, last_n=10)
+        enhanced_q = f"{context}\n{question}" if context else question
+
+        print(f"[STUDENT_SUP] Executing student domain for session={session_id}")
+        accumulated = ""
+        try:
+            for chunk in run_student_streaming(enhanced_q, session_id=session_id):
+                accumulated += chunk
+                # stream partial
+                yield {
+                    **state,
+                    "result": accumulated,
+                    "route": route + ["student_supervisor:streaming"],
+                }
+        except Exception as e:
+            accumulated = f"Error in student domain: {e}"
+
+        updated_route = route + ["student_supervisor:completed"]
         yield {
-            **state, 
-            "route": state.get("route", []),
-            "conversation_history": conversation_history
+            **state,
+            "result": accumulated,
+            "route": updated_route,
+            "messages": state.get("messages", []) + [AIMessage(content=accumulated, name="student_supervisor")],
         }
 
-    async def student_node(state: SupervisorState, config: RunnableConfig = None) -> AsyncGenerator[SupervisorState, None]:
-        q = state.get("question", "")
-        session_id = state.get("session_id", "default")
-        current_route = state.get("route", [])
-        
-        # Add conversation context to the question
-        context = memory_manager.get_last_context(session_id, last_n=20)
-        enhanced_question = f"{context}\n{q}" if context else q
-        
-        partial_result = ""
-        try:
-            for chunk in run_student_streaming(enhanced_question, session_id=session_id):
-                partial_result += chunk
-                yield {**state, "result": partial_result, "route": current_route + ["student_agent"]}
-        except Exception as e:
-            # Re-raise API errors immediately instead of falling back
-            raise RuntimeError(f"Student agent API error: {e}") from e
+    return student_wrapper
 
-    # Reuse agents for efficiency
-    faculty_basic_agent = FacultyAgent(debug=False)
-    try:
-        faculty_react_builder = FacultyReactAgentBuilder()
-        faculty_react_agent = faculty_react_builder.get_agent()
-    except Exception:
-        faculty_react_agent = None
-    # Initialize OBE agent
-    try:
-        obe_agent = OBEAgent()
-    except Exception:
-        obe_agent = None
-    # Simple exam agent will be instantiated lazily in the exam node
+
+def create_faculty_worker_node():
+    """
+    Create a node wrapper for the faculty ReAct agent.
+    
+    The faculty agent is already a ReAct agent with tools, so we configure
+    it with session-based memory and wrap for delegation.
+    """
+    # Build faculty agent once
+    faculty_builder = FacultyReactAgentBuilder()
+    
+    async def faculty_worker(state: SupervisorState):
+        """Execute faculty agent and return control to supervisor."""
+        question = state.get("question", "")
+        session_id = state.get("session_id", "default")
+        route = state.get("route", [])
+        
+        
+        # Add conversation context
+        from ..memory import memory_manager
+        context = memory_manager.get_last_context(session_id, last_n=20)
+        enhanced_question = f"{context}\n{question}" if context else question
+        
+        # Run faculty agent with session memory and capture streamed tokens
+        final_answer = ""
+        try:
+            for token in faculty_builder.stream(enhanced_question, session_id=session_id):
+                final_answer += token
+        except Exception as e:
+            final_answer = f"Error in faculty agent: {e}"
+        
+        updated_route = route + ["faculty_agent:completed"]
+        
+        
+        return {
+            **state,
+            "result": final_answer,
+            "route": updated_route,
+            "messages": state.get("messages", []) + [
+                AIMessage(content=final_answer, name="faculty_agent")
+            ]
+        }
+    
+    return faculty_worker
+
+
+def create_exam_worker_node():
+    """
+    Create a node wrapper for the exam ReAct agent.
+    """
+    # Lazy initialization
     exam_agent = None
-
-    async def faculty_node_runner(state: SupervisorState, config: RunnableConfig = None) -> AsyncGenerator[SupervisorState, None]:
-        q = state.get("question", "")
-        session_id = state.get("session_id", "default")
-        current_route = state.get("route", [])
-        history = state.get("conversation_history", [])
-        
-        # Check if this is an OBE mapping request
-        q_lower = q.lower()
-        obe_keywords = ["clo", "plo", "course learning outcome", "program learning outcome", 
-                        "mapping", "map", "outcome", "align", "alignment"]
-        is_obe_request = any(keyword in q_lower for keyword in obe_keywords)
-        
-        # If it's an OBE request, use the OBE agent
-        if is_obe_request and obe_agent is not None:
-            try:
-                # Extract CLOs and PLOs from the question
-                from ..nodes.faculty import _extract_outcomes
-                clos = _extract_outcomes(q, "clo")
-                plos = _extract_outcomes(q, "plo")
-                
-                # If we have both CLOs and PLOs, generate the mapping
-                if clos and plos:
-                    result = obe_agent.run(clos=clos, plos=plos)
-                    yield {**state, "result": result, "route": current_route + ["obe_agent"]}
-                    return
-                else:
-                    # Provide instructions if CLOs/PLOs are not provided
-                    instructions = (
-                        "I can help you map Course Learning Outcomes (CLOs) to Program Learning Outcomes (PLOs).\n\n"
-                        "To use this feature, please provide:\n"
-                        "1. A list of CLOs (Course Learning Outcomes)\n"
-                        "2. A list of PLOs (Program Learning Outcomes)\n\n"
-                        "I will then generate a mapping table showing which CLOs align with which PLOs, "
-                        "along with justifications for each mapping.\n\n"
-                        "Example format:\n"
-                        "```\n"
-                        "Map these outcomes:\n\n"
-                        "CLOs:\n"
-                        "- CLO 1: Understand basic algorithms\n"
-                        "- CLO 2: Implement data structures\n\n"
-                        "PLOs:\n"
-                        "- PLO 1: Apply knowledge of computing fundamentals\n"
-                        "- PLO 2: Design and develop solutions\n"
-                        "```"
-                    )
-                    yield {**state, "result": instructions, "route": current_route + ["obe_agent"]}
-                    return
-            except Exception as e:
-                error_msg = f"Error processing OBE mapping request: {str(e)}"
-                yield {**state, "result": error_msg, "route": current_route + ["obe_agent_error"]}
-                return
-        
-        # Add conversation context to the question for faculty queries
-        context = memory_manager.get_last_context(session_id, last_n=20)
-        enhanced_question = f"{context}\n{q}" if context else q
-
-        # Resolve person hint using LLM micro-resolver on pronoun-like follow-ups; fall back to regex scrape
-        try:
-            latest = q or ""
-            has_email_in_query = bool(re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", latest))
-            has_titled_name = bool(re.search(r"\b(?:dr\.|prof(?:essor)?)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b", latest))
-            mentions_multiple = bool(re.search(r"[,;]|\band\b", latest, flags=re.IGNORECASE))
-            has_pronoun = bool(re.search(r"\b(his|her|their|him|them)\b", latest, flags=re.IGNORECASE))
-
-            if has_pronoun and not (has_email_in_query or has_titled_name or mentions_multiple):
-                # Primary: LLM micro-resolver (with caching and strict JSON)
-                resolved = _llm_person_resolver(latest, history or [], session_id=session_id, last_n=3)
-                if resolved.get("email"):
-                    enhanced_question = f"{enhanced_question}\nPerson: {resolved['email']}"
-                elif resolved.get("person_name"):
-                    enhanced_question = f"{enhanced_question}\nPerson: {resolved['person_name']}"
-                else:
-                    # Fallback: scrape previous messages for a hint
-                    hint_email = None
-                    hint_name = None
-                    for turn in reversed(history or []):
-                        if getattr(turn, "agent_response", None) and not hint_email:
-                            m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", turn.agent_response)
-                            if m:
-                                hint_email = m.group(0)
-                        if getattr(turn, "agent_response", None) and not hint_name:
-                            n = re.search(r"\b(?:dr\.|prof(?:essor)?)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b", turn.agent_response)
-                            if n:
-                                hint_name = n.group(0)
-                        if hint_email and hint_name:
-                            break
-                    if hint_email:
-                        enhanced_question = f"{enhanced_question}\nPerson: {hint_email}"
-                    elif hint_name:
-                        enhanced_question = f"{enhanced_question}\nPerson: {hint_name}"
-        except Exception:
-            # Do not block the route on resolver issues; the agent may still resolve
-            pass
-        
-        partial_result = ""
-        try:
-            if faculty_react_agent is not None:
-                # Use tool-enabled agent with session-scoped memory
-                config_dict = {"configurable": {"thread_id": f"faculty_react::{session_id}"}}
-                final_answer = ""
-                for step in faculty_react_agent.stream(
-                    {"messages": [ {"type": "human", "content": enhanced_question} ]},
-                    config_dict,
-                    stream_mode="values",
-                ):
-                    if step.get("messages"):
-                        last_msg = step["messages"][-1]
-                        if hasattr(last_msg, "content") and isinstance(last_msg.content, str):
-                            final_answer = last_msg.content
-                partial_result = final_answer
-                yield {**state, "result": partial_result, "route": current_route + ["faculty_react_agent"]}
-            else:
-                # Fallback to basic faculty agent
-                for chunk in faculty_basic_agent.stream_answer(enhanced_question):
-                    partial_result += chunk
-                    yield {**state, "result": partial_result, "route": current_route + ["faculty_agent"]}
-        except Exception as e:
-            # Re-raise API errors immediately - let the agent handle its own fallbacks
-            raise RuntimeError(f"Faculty agent API error: {e}") from e
-        # Fallback to general collection only if strict not-found token
-        if partial_result.strip() == "NOT_FOUND_IN_DOCUMENTS":
-            fallback_result = ""
-            for chunk in run_general(enhanced_question):
-                fallback_result += chunk
-                yield {**state, "result": fallback_result, "route": current_route + ["faculty_agent", "fallback_to_general"]}
-            if fallback_result.strip() == "NOT_FOUND_IN_DOCUMENTS":
-                yield {**state, "result": "I'm sorry, I couldn't find information about that in our records.", "route": current_route + ["faculty_agent", "fallback_to_general"]}
-
-    async def exam_node_runner(state: SupervisorState, config: RunnableConfig = None) -> AsyncGenerator[SupervisorState, None]:
-        """
-        ReAct-based exam generation node with built-in memory.
-        The agent naturally handles conversation context, clarifications, and modifications.
-        """
-        question = state.get("question", "")
-        current_route = state.get("route", [])
-        user_role = state.get("user_role", "student")
-        session_id = state.get("session_id", "default")
-
-        # Instantiate exam agent lazily
+    
+    async def exam_worker(state: SupervisorState):
+        """Execute exam agent and return control to supervisor."""
         nonlocal exam_agent
-        if exam_agent is None:
-            try:
-                exam_agent = ExamReactAgent()
-            except Exception as e:
-                error_result = "Exam generation is currently unavailable."
-                yield {**state, "result": error_result, "route": current_route + ["exam_agent_error"]}
-                return
         
-        try:
-            # Stream the exam generation with full conversational context
-            # The ReAct agent handles memory automatically through its checkpointer
-            partial_result = ""
-            async for chunk in exam_agent.stream_async(question, session_id=session_id, user_role=user_role):
-                partial_result += chunk
-                # Yield intermediate states for streaming
-                yield {**state, "result": partial_result, "route": current_route + ["exam_react_agent"]}
-            
-            # Final yield with complete response
-            yield {**state, "result": partial_result, "route": current_route + ["exam_react_agent"]}
-            return
-        except Exception as e:
-            # Surface error via exam route
-            error_result = f"Exam generation error: {e}"
-            yield {**state, "result": error_result, "route": current_route + ["exam_agent_error"]}
-            return
-
-
-    async def direct_node(state: SupervisorState, config: RunnableConfig = None) -> AsyncGenerator[SupervisorState, None]:
-        """Handle small talk, greetings, and acknowledgements without invoking the main LLM."""
         question = state.get("question", "")
-        current_route = state.get("route", [])
+        session_id = state.get("session_id", "default")
+        user_role = state.get("user_role", "student")
+        route = state.get("route", [])
+        
+        
+        # Note: exam agent now supports both student and faculty roles with different prompts
+        
+        # Add conversation context for continuity (similar to faculty agent)
+        from ..memory import memory_manager
+        context = memory_manager.get_last_context(session_id, last_n=10)
+        enhanced_question = f"{context}\n{question}" if context else question
+        
+        # Initialize agent if needed
+        if exam_agent is None:
+            exam_agent = ExamReactAgent()
+        
+        # Stream exam generation with role-aware system prompt internally
+        result = ""
+        try:
+            async for chunk in exam_agent.stream_async(enhanced_question, session_id=session_id, user_role=user_role):
+                result += chunk
+        except Exception as e:
+            result = f"Error in exam agent: {e}"
+        
+        updated_route = route + ["exam_agent:completed"]
+        
+        
+        return {
+            **state,
+            "result": result,
+            "route": updated_route,
+            "messages": state.get("messages", []) + [
+                AIMessage(content=result, name="exam_agent")
+            ]
+        }
+    
+    return exam_worker
 
-        # Generate a lightweight acknowledgement for small-talk style messages
-        response = _generate_small_talk_reply(question)
-        yield {**state, "result": response, "route": current_route + ["small_talk"]}
 
-    graph.add_node("router", router_node)
-    graph.add_node("student", student_node)
-    graph.add_node("faculty", faculty_node_runner)
-    graph.add_node("direct", direct_node)
-    graph.add_node("exam", exam_node_runner)
+def create_obe_worker_node():
+    """
+    Create a node wrapper for the OBE agent.
+    """
+    # Initialize OBE agent
+    obe_agent = OBEAgent()
+    
+    async def obe_worker(state: SupervisorState):
+        """Execute OBE agent and return control to supervisor."""
+        question = state.get("question", "")
+        route = state.get("route", [])
+        
+        
+        # Extract CLOs and PLOs from question
+        # Simple extraction - can be enhanced
+        import re
+        
+        clo_pattern = r"CLO[- ]?\d+"
+        plo_pattern = r"PLO[- ]?\d+"
+        
+        clos = re.findall(clo_pattern, question, re.IGNORECASE)
+        plos = re.findall(plo_pattern, question, re.IGNORECASE)
+        
+        
+        if not clos or not plos:
+            help_msg = (
+                "To generate CLO-PLO mappings, please provide:\n"
+                "1. Course Learning Outcomes (CLOs)\n"
+                "2. Program Learning Outcomes (PLOs)\n\n"
+                "Example: 'Map CLO1, CLO2 to PLO1, PLO2, PLO3'"
+            )
+            return {
+                **state,
+                "result": help_msg,
+                "route": route + ["obe_agent:missing_outcomes"],
+                "messages": state.get("messages", []) + [
+                    AIMessage(content=help_msg, name="obe_agent")
+                ]
+            }
+        
+        # Generate mapping
+        try:
+            result = obe_agent.run(clos=clos, plos=plos)
+        except Exception as e:
+            result = f"Error generating OBE mapping: {e}"
+        
+        updated_route = route + ["obe_agent:completed"]
+        
+        
+        return {
+            **state,
+            "result": result,
+            "route": updated_route,
+            "messages": state.get("messages", []) + [
+                AIMessage(content=result, name="obe_agent")
+            ]
+        }
+    
+    return obe_worker
 
-    graph.set_entry_point("router")
-    graph.add_conditional_edges("router", _route_supervisor, {
-        "student": "student",
-        "faculty": "faculty",
-        "direct": "direct",
-        "exam": "exam",
-        "done": END,
-    })
-    graph.add_edge("student", END)
-    graph.add_edge("faculty", END)
-    graph.add_edge("direct", END)
-    graph.add_edge("exam", END)
 
-    return graph.compile()
+def create_direct_worker_node():
+    """
+    Create a node wrapper for handling direct/small talk responses.
+    Handles greetings, acknowledgments, general conversation, and questions about conversation history.
+    """
+    async def direct_worker(state: SupervisorState):
+        """Handle small talk and direct responses, including conversation history queries."""
+        # Use small_llm to decide and stream assistant-self/small-talk replies, now including history access.
+        raw_q = state.get("question", "")
+        route = state.get("route", [])
+        session_id = state.get("session_id", "default")
+
+        # Retrieve recent conversation history for context (last 10 turns, per conventions)
+        from ..memory import memory_manager
+        history = memory_manager.get_history(session_id) or []
+        recent_turns = history[-10:]  # Limit to last 10 for brevity and performance
+        history_context = "\n".join([
+            f"User: {turn.user_message}\nAssistant: {turn.agent_response}" for turn in recent_turns
+        ]) if recent_turns else "No prior conversation history."
+
+        # Build an expanded system prompt to include history-related queries
+        system_prompt = (
+            "You are CampusHive's assistant.\n"
+            "Role: Provide brief, helpful responses ONLY for:\n"
+            "- Greetings, thanks, self-referential questions, or casual small talk.\n"
+            "- Questions about the conversation history, such as 'What was my last question?', 'Summarize our chat', or similar meta-queries.\n"
+            "Scope: Do NOT attempt to answer domain-specific questions (faculty, student, exam, OBE). If the user's message does not fit the above, respond with the single token: \"NOT_ASSISTANT_SELF\".\n"
+            "Behavior: Use the provided conversation history to answer history-related queries accurately and concisely. Keep responses friendly and brief. Stream partial outputs when possible.\n"
+            f"Recent Conversation History:\n{history_context}"
+        )
+
+        from config import small_llm
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        # Prepare messages with history context
+        msgs = [SystemMessage(content=system_prompt), HumanMessage(content=raw_q)]
+
+        # Stream from small_llm; collect partials and check for reroute token
+        try:
+            partial = ""
+            async for chunk in small_llm.astream(msgs):
+                text = getattr(chunk, "content", None) or (chunk if isinstance(chunk, str) else "")
+                if text is None:
+                    continue
+                partial += text
+                # If the model indicates reroute token, break early
+                if "NOT_ASSISTANT_SELF" in partial:
+                    break
+                # Stream partial to caller
+                yield {
+                    **state,
+                    "result": partial,
+                    "route": route + ["direct_agent:streaming"],
+                    "messages": state.get("messages", [])
+                }
+
+            final = partial.strip()
+        except Exception as e:
+            # Do not swallow API errors; re-raise per conventions
+            raise RuntimeError(f"small_llm error in direct node: {e}") from e
+
+        # If small_llm signaled reroute, provide redirect hint
+        if final == "NOT_ASSISTANT_SELF" or "NOT_ASSISTANT_SELF" in final:
+            # Check for prior faculty context (unchanged logic)
+            prior = None
+            for turn in reversed(history):
+                for step in reversed(turn.route or []):
+                    if "faculty" in step:
+                        prior = "faculty"
+                        break
+                if prior:
+                    break
+            if prior == "faculty":
+                response = (
+                    "It looks like you're asking a follow-up about a person. I've routed this to the faculty agent."
+                )
+                yield {
+                    **state,
+                    "result": response,
+                    "route": route + ["direct_agent:redirect_hint:faculty"],
+                    "messages": state.get("messages", []) + [
+                        AIMessage(content=response, name="direct_agent")
+                    ],
+                }
+                return
+
+            # Generic fallback
+            response = (
+                "I'm here to help. If you meant to ask about faculty, students, exams, or learning outcomes, please rephrase or I'll route you to the right team."
+            )
+            updated_route = route + ["direct_agent:completed"]
+            yield {
+                **state,
+                "result": response,
+                "route": updated_route,
+                "messages": state.get("messages", []) + [
+                    AIMessage(content=response, name="direct_agent")
+                ]
+            }
+            return
+
+        # Otherwise, small_llm produced valid content; return final streamed result
+        updated_route = route + ["direct_agent:completed"]
+        yield {
+            **state,
+            "result": final,
+            "route": updated_route,
+            "messages": state.get("messages", []) + [
+                AIMessage(content=final, name="direct_agent")
+            ]
+        }
+        return
+
+    return direct_worker
 
 
+# ============================================================================
+# Build Supervisor Graph with Delegation
+# ============================================================================
+
+def build_supervisor_graph():
+    """Build hierarchical supervisor graph with domain supervisors.
+
+    Top-level: main_supervisor -> student_supervisor | faculty | exam | direct
+    Student domain uses existing compiled student graph via wrapper.
+    Faculty domain routes between faculty_info and obe using a small subgraph.
+    """
+
+    print("[BUILD] Constructing hierarchical supervisor graph...")
+
+    # Student domain: build subgraph with streaming wrappers
+    from .student_supervisor import build_student_graph as build_student_domain
+    from ..agent_wrappers.student_wrappers import general_info_node as st_general_node
+    from ..agent_wrappers.student_wrappers import timetable_node as st_timetable_node
+    from ..agent_wrappers.student_wrappers import degree_advisor_node as st_degree_node
+
+    student_graph = build_student_domain(
+        st_general_node(), st_timetable_node(), st_degree_node()
+    )
+    async def student_supervisor_node(state: dict):
+        print("[STUDENT_SUP] Executing student subgraph")
+        # Emit a streaming step start
+        yield {**state, "result": "", "route": state.get("route", []) + ["student_supervisor:streaming"]}
+        out = await student_graph.ainvoke(state)
+        r = list(out.get("route", []) or [])
+        r.append("student_supervisor:completed")
+        out["route"] = r
+        msgs = list(out.get("messages", []) or [])
+        msgs.append(AIMessage(content="Student subgraph completed", name="student_supervisor"))
+        out["messages"] = msgs
+        yield out
+
+    # Faculty domain: subgraph routing to faculty_info (react agent) or obe
+    faculty_info_node = create_faculty_worker_node()
+    obe_node = create_obe_worker_node()
+    faculty_graph = build_faculty_graph(faculty_info_node, obe_node)
+
+    # Leaf nodes
+    exam_node = create_exam_worker_node()
+    direct_node = create_direct_worker_node()
+
+    # Build main graph
+    from .main_supervisor import create_main_supervisor_node, build_main_graph
+    async def faculty_node_wrapper(state: dict):
+        print("[FACULTY_SUP] Executing faculty subgraph")
+        # Emit a lightweight streaming step (start)
+        yield {**state, "result": "", "route": state.get("route", []) + ["faculty_supervisor:streaming"]}
+        out = await faculty_graph.ainvoke(state)
+        # Ensure route/message consistency
+        try:
+            r = list(out.get("route", []) or [])
+            r.append("faculty_supervisor:completed")
+            out["route"] = r
+            msgs = list(out.get("messages", []) or [])
+            msgs.append(AIMessage(content="Faculty subgraph completed", name="faculty_supervisor"))
+            out["messages"] = msgs
+        except Exception:
+            pass
+        yield out
+
+    main_graph = build_main_graph(
+        student_supervisor_node=student_supervisor_node,
+        faculty_node=faculty_node_wrapper,
+        exam_node=exam_node,
+        direct_node=direct_node,
+    )
+
+    print("[BUILD] Hierarchical supervisor graph ready.")
+    return main_graph
+
+
+# ============================================================================
+# Runner Functions
+# ============================================================================
+
+# Build graph once at module level
 supervisor_graph = build_supervisor_graph()
 
 
-async def run_supervisor_async(question: str, session_id: str = "default", user_role: str = "student") -> dict:
-    """Async runner that streams the graph and returns the final 'result' string."""
-    final_result = ""
-    final_state = {}
-    try:
-        initial_state = {
-            "question": question,
-            "session_id": session_id,
-            "user_role": user_role,
-            "route": [],
-            "result": "",
-            "conversation_history": []
-        }
+async def run_supervisor_async(
+    question: str,
+    session_id: str = "default",
+    user_role: str = "student",
+    user_input_mode: bool = False  # True if this is a response to awaiting_user_input
+) -> dict:
+    """
+    Run the supervisor asynchronously with planning support.
+    
+    Args:
+        question: User's question or input
+        session_id: Session identifier for conversation memory
+        user_role: User's role (student, faculty, admin)
+        user_input_mode: True if answering a clarification request
+    
+    Returns:
+        Dict with 'response', 'route', and optionally 'awaiting_user_input', 'scratchpad'
+    """
+    from .planning_supervisor import get_planning_supervisor
+    from .planning_tools import detect_query_complexity
+    
+    # Load conversation history
+    conversation_history = memory_manager.get_history(session_id)
+    
+    # Check if we should use planning mode
+    planning_supervisor = get_planning_supervisor()
+    
+    # If user is providing input for a pending clarification, use planning mode
+    if user_input_mode:
+        is_complex = True
+    else:
+        is_complex = planning_supervisor.detect_complexity(question)
+    
+    print(f"[SUPERVISOR] Query complexity: {'COMPLEX' if is_complex else 'SIMPLE'}")
+    
+    # For complex queries, use planning supervisor
+    if is_complex:
+        # Check if we're resuming from a previous awaiting_user_input state
+        # Look for the last state in session memory
+        pending_state = None
+        if user_input_mode and conversation_history:
+            # Try to retrieve pending state from last turn
+            # In a proper implementation, we'd store this in a state manager
+            # For now, we'll reconstruct minimal state needed to continue
+            last_turn = conversation_history[-1] if conversation_history else None
+            if last_turn and "__AWAITING_USER_INPUT__" in str(last_turn.get("agent_response", "")):
+                # We have a pending state - need to preserve messages and scratchpad
+                # This is a limitation: we need to store intermediate state
+                # For now, create a new state with the user's response
+                pending_state = {
+                    "question": question,
+                    "session_id": session_id,
+                    "user_role": user_role,
+                    "route": ["main_supervisor:resuming_from_input"],
+                    "result": "",
+                    "conversation_history": conversation_history,
+                    "messages": [],  # Will be populated by planning supervisor
+                    "scratchpad": [f"[User Response] {question}"],
+                    "planning_mode": True,
+                }
         
-        async for event in supervisor_graph.astream_events(initial_state, version="v1"):
-            kind = event["event"]
-            if kind == "on_chain_end":
-                node_name = event["name"]
-                if node_name in ["student", "faculty", "direct", "exam"]:
-                    data = event["data"].get("output")
-                    if data and "result" in data:
-                        final_result = data["result"]
-                        final_state.update(data)
-                        break
-                        
-    except Exception as e:
-        return {"response": f"Error processing question: {str(e)}", "route": []}
+        if not pending_state:
+            # New complex query
+            planning_state = {
+                "question": question,
+                "session_id": session_id,
+                "user_role": user_role,
+                "route": [],
+                "result": "",
+                "conversation_history": conversation_history,
+                "messages": [HumanMessage(content=question)],
+                "scratchpad": [],
+                "plan": [],
+                "current_task_id": 0,
+                "intermediate_results": {},
+                "awaiting_user_input": False,
+                "user_input_question": "",
+                "user_input_context": {},
+                "planning_mode": True,
+                "max_retries": 3,
+                "total_api_calls": 0
+            }
+        else:
+            planning_state = pending_state
+        
+        try:
+            # Execute with resume flag if in user_input_mode
+            result_state = await planning_supervisor.execute_complex(
+                planning_state, 
+                resume_from_input=user_input_mode
+            )
+            
+            # Check if we need user input
+            if result_state.get("awaiting_user_input"):
+                # Don't store in memory yet - waiting for user input
+                return {
+                    "response": result_state.get("user_input_question", "I need more information."),
+                    "awaiting_user_input": True,
+                    "scratchpad": result_state.get("scratchpad", []),
+                    "route": result_state.get("route", []),
+                    "planning_mode": True
+                }
+            
+            # Store in memory
+            final_result = result_state.get("result", "")
+            final_route = result_state.get("route", [])
+            memory_manager.add_turn(session_id, question, final_result, final_route)
+            
+            return {
+                "response": final_result,
+                "result": final_result,
+                "route": final_route,
+                "scratchpad": result_state.get("scratchpad", []),
+                "planning_mode": True,
+                "awaiting_user_input": False
+            }
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error_msg = f"Error in planning mode: {str(e)}"
+            return {
+                "response": error_msg,
+                "route": ["error:planning_mode"],
+                "planning_mode": True
+            }
     
-    # Only provide fallback if no result was obtained at all
-    if not final_result.strip():
-        final_result = "I'm sorry, I couldn't process your question. Please try rephrasing it."
-
-    # Normalize any multi-word explanatory output that contains the token
-    # so callers receive exactly the single token when no docs were found.
-    if "NOT_FOUND_IN_DOCUMENTS" in final_result:
-        final_result = "NOT_FOUND_IN_DOCUMENTS"
-
-    route = final_state.get("route", [])
+    # For simple queries, use fast path (existing hierarchical routing)
+    # Build initial state
+    initial_state = {
+        "question": question,
+        "session_id": session_id,
+        "user_role": user_role,
+        "route": [],
+        "result": "",
+        "conversation_history": conversation_history,
+        "messages": [HumanMessage(content=question)]
+    }
     
-    # Store conversation turn in memory
-    memory_manager.add_turn(session_id, question, final_result, route)
     
-    return {"response": final_result, "route": route}
-
-
-def run_supervisor(question: str, session_id: str = "default", user_role: str = "student") -> dict:
-    """Synchronous wrapper for the async supervisor function."""
-    import asyncio
+    final_result = ""
+    final_route = []
+    
     try:
-        # Try to get the current event loop
+        # Stream through graph with increased recursion limit
+        # The supervisor ReAct agent may need multiple reasoning steps
+        config = {"recursion_limit": 50}
+        
+        
+        event_count = 0
+        async for event in supervisor_graph.astream(initial_state, config=config):
+            event_count += 1
+
+            # Capture results; consider new node names
+            for node_name in ["student_supervisor", "faculty", "exam", "direct"]:
+                if node_name in event:
+                    node_output = event[node_name]
+                    if isinstance(node_output, dict) and "result" in node_output:
+                        # Only accept non-empty results to avoid clobbering a real
+                        # response with intermediate empty streaming steps.
+                        res = node_output.get("result", "")
+                        if res:
+                            final_result = res
+                            final_route = node_output.get("route", final_route)
+            
+
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "response": f"Error in supervisor delegation: {e}",
+            "route": ["error"]
+        }
+    
+    # Fallback if no result
+    if not final_result:
+        final_result = "I apologize, but I couldn't process your request. Please try again."
+    
+    # Store in memory
+    memory_manager.add_turn(session_id, question, final_result, final_route)
+    
+    
+    return {
+        "response": final_result,
+        "result": final_result,  # backward-compatible key used by some callers
+        "route": final_route
+    }
+
+
+def run_supervisor(
+    question: str,
+    session_id: str = "default",
+    user_role: str = "student"
+) -> dict:
+    """
+    Synchronous wrapper for supervisor.
+    
+    Args:
+        question: User's question
+        session_id: Session identifier
+        user_role: User's role
+    
+    Returns:
+        Dict with 'response' and 'route'
+    """
+    import asyncio
+    
+    try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If we're in an async context, we can't use run()
-            # This is a fallback for sync usage
+            # Use thread pool if already in async context
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, run_supervisor_async(question, session_id, user_role))
+                future = executor.submit(
+                    asyncio.run,
+                    run_supervisor_async(question, session_id, user_role)
+                )
                 return future.result()
         else:
-            return asyncio.run(run_supervisor_async(question, session_id, user_role))
+            return asyncio.run(
+                run_supervisor_async(question, session_id, user_role)
+            )
     except Exception as e:
-        return {"response": f"Error processing question: {str(e)}", "route": []}
+        return {
+            "response": f"Error: {e}",
+            "route": ["error"]
+        }

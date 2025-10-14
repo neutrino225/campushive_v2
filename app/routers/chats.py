@@ -12,51 +12,12 @@ from app.schemas import (
     ChatMessageResponse,
 )
 from app.auth import get_current_user
+from app.utils.titles import generate_chat_title
 import logging
-import json
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chats", tags=["Chat Management"])
-
-
-def _summarize_title(user_text: str | None, agent_text: str | None) -> str | None:
-    """
-    Create a compact, human-friendly title from the first user message
-    (and optionally first agent reply). Keep it short like ChatGPT.
-    """
-    if not user_text and not agent_text:
-        return None
-
-    source = (user_text or "").strip()
-    if not source and agent_text:
-        source = agent_text.strip()
-
-    # Use first sentence-ish; fall back to first 6-10 words
-    # Remove newlines and extra spaces
-    source = " ".join(source.split())
-    # Strip common prefixes
-    prefixes = ["please", "can you", "could you", "i want", "i need", "how do i", "how to", "what is", "tell me", "help me"]
-    lower = source.lower()
-    for p in prefixes:
-        if lower.startswith(p + " "):
-            source = source[len(p)+1:]
-            break
-
-    # Cut at sentence end or cap tokens
-    cut_points = ["?", ".", "!"]
-    cut_idx = min([source.find(c) for c in cut_points if c in source] or [len(source)])
-    snippet = source[:cut_idx]
-    words = snippet.split()
-    if len(words) > 10:
-        words = words[:10]
-    title = " ".join(words).strip()
-    if not title:
-        title = (source[:50] + ("…" if len(source) > 50 else "")).strip()
-
-    # Capitalize nicely
-    title = title[:1].upper() + title[1:]
-    return title
 
 
 @router.get("", response_model=List[ChatSessionResponse])
@@ -93,7 +54,7 @@ async def list_chat_sessions(
         )
         first_user = next((m.content for m in first_two if m.message_type == "user"), None)
         first_agent = next((m.content for m in first_two if m.message_type != "user"), None)
-        display_title = _summarize_title(first_user, first_agent)
+        display_title = generate_chat_title(first_user, first_agent)
 
         session_dict = {
             "id": session.id,
@@ -179,7 +140,7 @@ async def get_chat_session(
     ).order_by(ChatMessage.created_at.asc()).limit(2).all()
     first_user = next((m.content for m in first_two if m.message_type == "user"), None)
     first_agent = next((m.content for m in first_two if m.message_type != "user"), None)
-    display_title = _summarize_title(first_user, first_agent)
+    display_title = generate_chat_title(first_user, first_agent)
 
     return ChatSessionWithMessages(
         id=session.id,
@@ -282,7 +243,7 @@ async def update_chat_session(
     ).order_by(ChatMessage.created_at.asc()).limit(2).all()
     first_user = next((m.content for m in first_two if m.message_type == "user"), None)
     first_agent = next((m.content for m in first_two if m.message_type != "user"), None)
-    display_title = _summarize_title(first_user, first_agent)
+    display_title = generate_chat_title(first_user, first_agent)
     
     logger.info(
         f"User {current_user.username} updated chat session "

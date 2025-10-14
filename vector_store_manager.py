@@ -70,16 +70,8 @@ class DegreeDataProcessor(DataProcessor):
         with open(source_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # Attempt to use tqdm for progress; fallback to identity iterator if unavailable
-        try:
-            from tqdm import tqdm
-            _tqdm = tqdm
-        except Exception:
-            def _tqdm(x, **_kwargs):
-                return x
-
         documents = []
-        for item in _tqdm(data, desc="Processing degree programs", unit="prog"):
+        for item in data:
             try:
                 # Extract degree program information
                 title = item.get("title", "")
@@ -206,19 +198,12 @@ class ExamDataProcessor(DataProcessor):
             data = json.load(f)
 
         documents = []
-        # Attempt to use tqdm for progress; fallback quietly if not available
-        try:
-            from tqdm import tqdm
-            _tqdm = tqdm
-        except Exception:
-            def _tqdm(x, **_kwargs):
-                return x
-        # Iterate with progress over exams and questions
-        for exam in _tqdm(data, desc="Processing exams", unit="exam"):
+        # Iterate over exams and questions
+        for exam in data:
             course = exam.get("course", "Unknown")
             exam_type = exam.get("exam_type", "Unknown")
             questions = exam.get("questions", []) or []
-            for question in _tqdm(questions, desc=f"Questions ({course})", unit="q", leave=False):
+            for question in questions:
                 content = f"Course: {course}\nExam Type: {exam_type}\n"
                 content += f"Topic: {question.get('topic', 'N/A')}\n"
                 content += f"Question: {question.get('question_text', '')}\n"
@@ -247,17 +232,9 @@ class FacultyDataProcessor(DataProcessor):
             raise FileNotFoundError(f"Faculty data directory not found: {source_path}")
         
         # Load all faculty JSON files
-        # Attempt to use tqdm for progress; fallback quietly if not available
-        try:
-            from tqdm import tqdm
-            _tqdm = tqdm
-        except Exception:
-            def _tqdm(x, **_kwargs):
-                return x
-
         people = []
         file_list = [f for f in os.listdir(source_path) if f.endswith('.json')]
-        for fname in _tqdm(file_list, desc="Loading faculty files", unit="file"):
+        for fname in file_list:
             fpath = os.path.join(source_path, fname)
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
@@ -275,7 +252,7 @@ class FacultyDataProcessor(DataProcessor):
         
         # Convert to documents (show progress)
         documents = []
-        for person in _tqdm(people, desc="Processing faculty", unit="person"):
+        for person in people:
             try:
                 doc = FacultyDataProcessor._create_faculty_document(person)
                 documents.append(doc)
@@ -381,14 +358,6 @@ class GeneralDataProcessor(DataProcessor):
         if not os.path.isdir(source_path):
             raise FileNotFoundError(f"General data directory not found: {source_path}")
         
-        # Attempt to use tqdm for progress; fallback quietly if not available
-        try:
-            from tqdm import tqdm
-            _tqdm = tqdm
-        except Exception:
-            def _tqdm(x, **_kwargs):
-                return x
-
         documents = []
         import concurrent.futures
 
@@ -422,7 +391,7 @@ class GeneralDataProcessor(DataProcessor):
         try:
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 results = executor.map(load_single_file, filepaths)
-                for result in _tqdm(results, desc="Loading markdown files", unit="file"):
+                for result in results:
                     documents.extend(result)
         finally:
             # Restore original stderr

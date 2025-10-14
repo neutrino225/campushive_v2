@@ -12,6 +12,7 @@ sys.path.insert(0, str(root_dir))
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain.prompts import PromptTemplate
 from langchain.agents import Tool
+from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -477,11 +478,8 @@ class DegreeReactAgentBuilder:
         self.retriever = DegreeVectorStore().get_retriever(k=20)
         self.preferences = UserPreferenceCollector()
         self.matcher = DegreeMatcher(self.catalog)
-        self.checkpointer = MemorySaver()
+        # Removed MemorySaver - conversation context now passed via messages from wrapper
         self.agent = self._build_agent()
-
-    def _wrap(self, fn: Callable[[str], str], name: str, description: str) -> Tool:
-        return Tool(name=name, func=fn, description=description)
 
     # ----- tool impls (single-string inputs) -----
     def _tool_by_field(self, field: str) -> str:
@@ -722,47 +720,56 @@ class DegreeReactAgentBuilder:
         return "\n".join(lines)
 
     def _build_agent(self):
-        tools: List[Tool] = [
-            self._wrap(
-                self._tool_by_field,
-                name="list_programs_by_field",
-                description="List all degree programs in a specific field (e.g., 'Computer Science', 'Business', 'AI'). Use this when user asks about programs in a field."
-            ),
-            self._wrap(
-                self._tool_by_level,
-                name="list_programs_by_level",
-                description="List all degree programs at a specific level (e.g., 'Bachelor', 'Master', 'PhD', 'BS', 'MS'). Use when user asks about undergraduate or graduate programs."
-            ),
-            self._wrap(
-                self._tool_details,
-                name="get_program_details",
-                description="Get comprehensive details about a specific degree program including vision, mission, career opportunities, and structure. Input: exact program title."
-            ),
-            self._wrap(
-                self._tool_compare,
-                name="compare_programs",
-                description="Compare two degree programs side-by-side. Input format: 'Program A vs Program B' or 'Program A | Program B'."
-            ),
-            self._wrap(
-                self._tool_recommend,
-                name="recommend_programs",
-                description="Provide intelligent program recommendations based on collected user preferences. Uses stored preferences for personalized suggestions."
-            ),
-            self._wrap(
-                self._tool_collect_preferences,
-                name="collect_user_preferences",
-                description="Collect and store user preferences (interests, level, student status, career goals). Use when user shares information about themselves."
-            ),
-            self._wrap(
-                self._tool_semester_courses,
-                name="get_semester_courses",
-                description="Get list of courses for a specific semester of a program. Input format: 'program name, semester number' (e.g., 'BS Computer Science, 3')."
-            ),
-            self._wrap(
-                self._tool_semantic,
-                name="semantic_search",
-                description="Search degree program corpus using semantic similarity. Use for complex queries or when catalog search doesn't yield results."
-            ),
+        # Define tools using @tool decorator for proper schema inference
+        @tool("list_programs_by_field")
+        def list_programs_by_field(field: str) -> str:
+            """List all degree programs in a specific field (e.g., 'Computer Science', 'Business', 'AI'). Use this when user asks about programs in a field."""
+            return self._tool_by_field(field)
+
+        @tool("list_programs_by_level")
+        def list_programs_by_level(level: str) -> str:
+            """List all degree programs at a specific level (e.g., 'Bachelor', 'Master', 'PhD', 'BS', 'MS'). Use when user asks about undergraduate or graduate programs."""
+            return self._tool_by_level(level)
+
+        @tool("get_program_details")
+        def get_program_details(program_title: str) -> str:
+            """Get comprehensive details about a specific degree program including vision, mission, career opportunities, and structure. Input: exact program title."""
+            return self._tool_details(program_title)
+
+        @tool("compare_programs")
+        def compare_programs(text: str) -> str:
+            """Compare two degree programs side-by-side. Input format: 'Program A vs Program B' or 'Program A | Program B'."""
+            return self._tool_compare(text)
+
+        @tool("recommend_programs")
+        def recommend_programs(dummy: str = "") -> str:
+            """Provide intelligent program recommendations based on collected user preferences. Uses stored preferences for personalized suggestions."""
+            return self._tool_recommend()
+
+        @tool("collect_user_preferences")
+        def collect_user_preferences(text: str) -> str:
+            """Collect and store user preferences (interests, level, student status, career goals). Use when user shares information about themselves."""
+            return self._tool_collect_preferences(text)
+
+        @tool("get_semester_courses")
+        def get_semester_courses(text: str) -> str:
+            """Get list of courses for a specific semester of a program. Input format: 'program name, semester number' (e.g., 'BS Computer Science, 3')."""
+            return self._tool_semester_courses(text)
+
+        @tool("semantic_search")
+        def semantic_search(query: str) -> str:
+            """Search degree program corpus using semantic similarity. Use for complex queries or when catalog search doesn't yield results."""
+            return self._tool_semantic(query)
+
+        tools = [
+            list_programs_by_field,
+            list_programs_by_level,
+            get_program_details,
+            compare_programs,
+            recommend_programs,
+            collect_user_preferences,
+            get_semester_courses,
+            semantic_search,
         ]
 
         system_prompt = (
@@ -792,7 +799,7 @@ class DegreeReactAgentBuilder:
         return create_react_agent(
             model=llm,
             tools=tools,
-            checkpointer=self.checkpointer,
+            # No checkpointer - stateless agent receives context via messages
             name="Degree Advisor",
         )
 

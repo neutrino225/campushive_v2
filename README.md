@@ -20,10 +20,18 @@ CampusHive now includes a complete authentication and chat management system wit
 
 ## Quick overview
 
-- Supervisor graph routes queries to `student` or `faculty` paths (LLM-based classifiers with keyword fallback).
-- Student path: General RAG assistant (`RAGEngine`) and a `DegreeAdvisorAgent` for degree-related queries.
-- Faculty path: `FacultyAgent` provides structured tools (email, department, publications) and semantic fallbacks.
-- Vector stores are managed centrally via `vector_store_manager.py` (Chroma + BM25 + MMR ensemble).
+**Delegation-Based Multi-Agent Architecture**
+
+CampusHive uses LangGraph's Command-based delegation pattern for intelligent query routing:
+
+- **Supervisor**: Makes a single LLM call to analyze the question and delegates via `Command(goto=agent_name)`
+- **Worker Agents**: Specialized agents (student, faculty, exam, obe) execute and return results
+- **Student path**: General RAG assistant (`RAGEngine`) + `DegreeAdvisorAgent` for degree programs
+- **Faculty path**: `FacultyReactAgent` with structured tools (email, department, publications, research)
+- **Exam path**: `ExamReactAgent` for quiz/exam generation (faculty/admin only)
+- **OBE path**: `OBEAgent` for CLO-PLO outcome mapping
+
+Vector stores are managed centrally via `vector_store_manager.py` (Chroma + BM25 + MMR ensemble).
 
 ## Getting started
 

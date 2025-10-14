@@ -241,7 +241,7 @@ class ExamReactAgent:
     
     def __init__(self):
         """Initialize the exam ReAct agent with memory."""
-        self.checkpointer = MemorySaver()
+        # Removed MemorySaver - conversation context now passed via messages from wrapper
         self.agent = self._create_agent()
     
     def _create_agent(self):
@@ -250,20 +250,22 @@ class ExamReactAgent:
         # Define tools
         tools = [search_exam_inspiration, calculate_exam_marks, validate_exam_structure]
         
-        # Create the agent with checkpointer for memory
+        # Create the agent without checkpointer - stateless, receives context via messages
         return create_react_agent(
             model=llm,
             tools=tools,
-            checkpointer=self.checkpointer,
+            # No checkpointer - stateless agent receives context via messages
             name="Exam Agent",
         )
     
     def _get_system_message(self, user_role: str = "student") -> str:
         """Get the system message based on user role."""
         if (user_role or "").lower() == "faculty":
-            return """You are an expert exam creator for university faculty.
+            return """You are an expert exam creator for FAST-NUCES (National University of Computer and Emerging Sciences), Islamabad campus faculty.
 
 **YOUR PRIMARY TASK**: Generate complete, well-structured university exams based on user requirements.
+
+**CONTEXT AWARENESS**: You have access to conversation history. If the user references previous exam requests or asks for modifications ("make it longer", "add more questions", "follow the pattern"), you MUST use that context to understand what exam they're referring to and apply the changes accordingly.
 
 **IMPORTANT TOOL USAGE**:
 - You have access to `search_exam_inspiration` to find past exam questions for inspiration
@@ -350,9 +352,15 @@ After the exam questions, add a separate section:
 - If user says "make it harder", increase difficulty of the EXISTING exam
 - Always maintain context from previous turns
 
-**HANDLING CONFLICTS**:
-- If user requests conflicting requirements (e.g., "50 marks" for a "final exam"), ASK for clarification
-- If user clarifies, REMEMBER their original request and apply the clarification
+**HANDLING CUSTOM/FLEXIBLE REQUIREMENTS**:
+- **FLEXIBLE EXAM FORMATS**: If user specifies custom marks or time (e.g., "50 marks, 180 minutes" or "100 marks, 60 minutes"), ADAPT the structure to fit their requirements
+- For custom formats:
+  * Adjust number of questions to fit the time available (more time = more complex/lengthy questions)
+  * Ensure total marks match exactly what was requested
+  * Maintain Section A/B/C structure but scale proportionally
+  * Example: "50 marks, 180 minutes" → Fewer questions but make them LONGER and more detailed to fill the time
+- If standard patterns don't fit user requirements, prioritize USER'S SPECIFIC REQUIREMENTS over default patterns
+- Only ask for clarification if requirements are truly ambiguous or impossible (e.g., "5 questions worth 100 marks")
 
 **CRITICAL WORKFLOW** (FOLLOW THIS EXACTLY):
 1. Use `search_exam_inspiration` tool to get ideas (silently, internal use only)
@@ -371,9 +379,11 @@ After the exam questions, add a separate section:
 - The user should ONLY see the clean exam paper, not validation messages or tool outputs
 """
         else:
-            return """You are a helpful exam generation assistant for students creating practice/mock exams.
+            return """You are a helpful exam generation assistant for FAST-NUCES (National University of Computer and Emerging Sciences), Islamabad campus students creating practice/mock exams.
 
 **YOUR PRIMARY TASK**: Generate realistic practice exams for university students.
+
+**CONTEXT AWARENESS**: You have access to conversation history. If the user references previous exam requests or asks for modifications ("make it longer", "add more questions"), you MUST use that context to understand what they're referring to.
 
 **EXAM STRUCTURE PATTERNS**:
 

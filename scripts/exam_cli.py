@@ -109,13 +109,13 @@ async def run(query: str, role: str, session_id: str | None, verbose: bool) -> i
             node_name = event.get("name")
 
             if kind == "on_chain_start":
-                if node_name in ["router", "exam", "student", "faculty", "direct"] and node_name not in shown_nodes:
+                if node_name in ["main_supervisor", "exam", "student_supervisor", "faculty", "direct"] and node_name not in shown_nodes:
                     if verbose:
                         console.print(f"[dim]-> {node_name}[/dim]")
                     shown_nodes.add(node_name)
 
             elif kind == "on_chain_stream":
-                if node_name in ["exam", "student", "faculty", "direct"]:
+                if node_name in ["exam", "student_supervisor", "faculty", "direct"]:
                     data = event["data"].get("chunk")
                     if data and "result" in data:
                         delta = data["result"][len(result_accum):]
@@ -124,7 +124,7 @@ async def run(query: str, role: str, session_id: str | None, verbose: bool) -> i
                         result_accum = data["result"]
 
             elif kind == "on_chain_end":
-                if node_name in ["exam", "student", "faculty", "direct"]:
+                if node_name in ["exam", "student_supervisor", "faculty", "direct"]:
                     data = event["data"].get("output")
                     if data and "result" in data:
                         if not printed_result:

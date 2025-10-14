@@ -36,17 +36,22 @@ class ConversationTurn:
 
 
 class MemoryManager:
-    """Manages conversation memory for multiple users/sessions."""
+    """Manages conversation memory for multiple users/sessions with safeguards."""
     
-    def __init__(self, max_history_length: int = 10):
+    def __init__(self, max_history_length: int = 50, max_sessions: int = 1000, session_ttl_hours: int = 24):
         """
-        Initialize memory manager.
+        Initialize memory manager with safeguards.
         
         Args:
             max_history_length: Maximum number of conversation turns to keep per session
+            max_sessions: Maximum number of concurrent sessions to prevent memory overflow
+            session_ttl_hours: Time-to-live for inactive sessions in hours
         """
         self.max_history_length = max_history_length
+        self.max_sessions = max_sessions
+        self.session_ttl_hours = session_ttl_hours
         self._sessions: Dict[str, List[ConversationTurn]] = {}
+        self._session_last_access: Dict[str, datetime] = {}  # Track last access for TTL
         self._lock = threading.RLock()  # Thread-safe operations
     
     def get_history(self, session_id: str) -> List[ConversationTurn]:
@@ -60,11 +65,13 @@ class MemoryManager:
             List of conversation turns, ordered chronologically
         """
         with self._lock:
+            # Update last access time
+            self._session_last_access[session_id] = datetime.now()
             return self._sessions.get(session_id, []).copy()
     
     def add_turn(self, session_id: str, user_message: str, agent_response: str, route: List[str] = None) -> None:
         """
-        Add a new conversation turn to the session history.
+        Add a new conversation turn to the session history with safeguards.
         
         Args:
             session_id: Unique identifier for the session
@@ -73,8 +80,18 @@ class MemoryManager:
             route: List of agents/nodes that were used
         """
         with self._lock:
+            # Check if we need to cleanup old sessions
+            self._cleanup_stale_sessions()
+            
+            # Enforce max sessions limit (evict oldest if needed)
+            if len(self._sessions) >= self.max_sessions and session_id not in self._sessions:
+                self._evict_oldest_session()
+            
             if session_id not in self._sessions:
                 self._sessions[session_id] = []
+            
+            # Update last access time
+            self._session_last_access[session_id] = datetime.now()
             
             turn = ConversationTurn(
                 user_message=user_message,
@@ -89,6 +106,79 @@ class MemoryManager:
             if len(self._sessions[session_id]) > self.max_history_length:
                 self._sessions[session_id] = self._sessions[session_id][-self.max_history_length:]
     
+    def _cleanup_stale_sessions(self) -> int:
+        """
+        Remove sessions that haven't been accessed for TTL hours.
+        Called automatically by add_turn. Thread-safe (assumes lock is held).
+        
+        Returns:
+            Number of sessions removed
+        """
+        from datetime import timedelta
+        
+        now = datetime.now()
+        ttl_delta = timedelta(hours=self.session_ttl_hours)
+        stale_sessions = []
+        
+        for session_id, last_access in self._session_last_access.items():
+            if now - last_access > ttl_delta:
+                stale_sessions.append(session_id)
+        
+        for session_id in stale_sessions:
+            if session_id in self._sessions:
+                del self._sessions[session_id]
+            if session_id in self._session_last_access:
+                del self._session_last_access[session_id]
+        
+        if stale_sessions:
+            print(f"[MEMORY] Cleaned up {len(stale_sessions)} stale sessions (TTL: {self.session_ttl_hours}h)")
+        
+        return len(stale_sessions)
+    
+    def _evict_oldest_session(self) -> Optional[str]:
+        """
+        Evict the oldest (least recently accessed) session.
+        Called when max_sessions limit is reached. Thread-safe (assumes lock is held).
+        
+        Returns:
+            The session_id that was evicted, or None if no sessions to evict
+        """
+        if not self._session_last_access:
+            return None
+        
+        # Find oldest session
+        oldest_session = min(self._session_last_access.items(), key=lambda x: x[1])
+        session_id = oldest_session[0]
+        
+        # Remove it
+        if session_id in self._sessions:
+            del self._sessions[session_id]
+        if session_id in self._session_last_access:
+            del self._session_last_access[session_id]
+        
+        print(f"[MEMORY] Evicted oldest session {session_id} (max_sessions: {self.max_sessions})")
+        return session_id
+    
+    def get_memory_stats(self) -> Dict:
+        """
+        Get memory usage statistics.
+        
+        Returns:
+            Dict with memory statistics
+        """
+        with self._lock:
+            total_turns = sum(len(history) for history in self._sessions.values())
+            avg_turns = total_turns / len(self._sessions) if self._sessions else 0
+            
+            return {
+                "active_sessions": len(self._sessions),
+                "max_sessions": self.max_sessions,
+                "total_turns": total_turns,
+                "avg_turns_per_session": round(avg_turns, 2),
+                "max_history_length": self.max_history_length,
+                "session_ttl_hours": self.session_ttl_hours
+            }
+    
     def clear_session(self, session_id: str) -> None:
         """
         Clear conversation history for a session.
@@ -99,6 +189,8 @@ class MemoryManager:
         with self._lock:
             if session_id in self._sessions:
                 del self._sessions[session_id]
+            if session_id in self._session_last_access:
+                del self._session_last_access[session_id]
     
     def get_session_count(self) -> int:
         """Get the number of active sessions."""
@@ -201,5 +293,8 @@ class MemoryManager:
         return session_id
 
 
-# Global memory manager instance
-memory_manager = MemoryManager()
+# Global memory manager instance with safeguards
+# - Max 50 turns per session (auto-trim)
+# - Max 1000 concurrent sessions (auto-evict oldest)
+# - 24-hour TTL for inactive sessions (auto-cleanup)
+memory_manager = MemoryManager(max_history_length=50, max_sessions=1000, session_ttl_hours=24)

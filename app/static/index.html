@@ -1207,6 +1207,53 @@
             const content = document.createElement('div');
             content.className = 'message-content';
 
+            // Add thinking/planning accordion for bot messages (collapsed by default)
+            let thinkingAccordion = null;
+            let thinkingContent = null;
+            if (role === 'bot') {
+                thinkingAccordion = document.createElement('div');
+                thinkingAccordion.className = 'thinking-accordion';
+                thinkingAccordion.style.cssText = 'margin-bottom: 12px; display: none;'; // Hidden by default
+
+                const thinkingHeader = document.createElement('div');
+                thinkingHeader.className = 'thinking-header';
+                thinkingHeader.style.cssText = 'display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--bg-tertiary); border-radius: 8px; cursor: pointer; user-select: none; transition: background 0.2s;';
+                thinkingHeader.innerHTML = '<span style="font-size: 16px;">💭</span><span style="font-size: 13px; font-weight: 500; color: var(--text-secondary);">Thinking...</span><span class="thinking-chevron" style="margin-left: auto; font-size: 12px; transition: transform 0.2s;">▼</span>';
+
+                thinkingHeader.addEventListener('mouseenter', () => {
+                    thinkingHeader.style.background = 'var(--accent-light)';
+                });
+                thinkingHeader.addEventListener('mouseleave', () => {
+                    thinkingHeader.style.background = 'var(--bg-tertiary)';
+                });
+
+                thinkingContent = document.createElement('div');
+                thinkingContent.className = 'thinking-content';
+                thinkingContent.style.cssText = 'max-height: 0; overflow: hidden; transition: max-height 0.3s ease; padding: 0 12px;';
+
+                const thinkingSteps = document.createElement('div');
+                thinkingSteps.className = 'thinking-steps';
+                thinkingSteps.style.cssText = 'padding: 8px 0; font-size: 12px; color: var(--text-tertiary);';
+                thinkingContent.appendChild(thinkingSteps);
+
+                let isExpanded = false;
+                thinkingHeader.addEventListener('click', () => {
+                    isExpanded = !isExpanded;
+                    const chevron = thinkingHeader.querySelector('.thinking-chevron');
+                    if (isExpanded) {
+                        thinkingContent.style.maxHeight = thinkingContent.scrollHeight + 'px';
+                        chevron.style.transform = 'rotate(180deg)';
+                    } else {
+                        thinkingContent.style.maxHeight = '0';
+                        chevron.style.transform = 'rotate(0deg)';
+                    }
+                });
+
+                thinkingAccordion.appendChild(thinkingHeader);
+                thinkingAccordion.appendChild(thinkingContent);
+                content.appendChild(thinkingAccordion);
+            }
+
             const messageText = document.createElement('div');
             messageText.className = 'message-text';
             if (role === 'bot') {
@@ -1242,7 +1289,7 @@
             messages.appendChild(li);
             li.scrollIntoView({ behavior: 'smooth', block: 'end' });
 
-            return { li, bubble: messageText, routeIndicator };
+            return { li, bubble: messageText, routeIndicator, thinkingAccordion, thinkingContent };
         }
 
         async function updateMarkdownBubble(bubble, rawText) {
@@ -1333,6 +1380,9 @@
             });
         }
 
+        // Track if we're awaiting user input (planning mode continuation)
+        let awaitingUserInput = false;
+
         async function handleSubmit(event) {
             event.preventDefault();
             const question = input.value.trim();
@@ -1356,6 +1406,9 @@
             let routeTrail = [];
             let partial = '';
 
+            // Reset placeholder if we were answering a clarification
+            input.placeholder = 'Type your message...';
+
             try {
                 // Backend will automatically load conversation history from DB into memory
                 // This gives the LLM full context of previous messages in this session
@@ -1365,9 +1418,13 @@
                     body: JSON.stringify({
                         question,
                         session_id: currentSession ? currentSession.session_name : null,
-                        stream: true
+                        stream: true,
+                        user_input_mode: awaitingUserInput  // Set to true if responding to clarification
                     })
                 });
+
+                // Reset the flag after sending
+                awaitingUserInput = false;
 
                 if (!response.ok || !response.body) {
                     throw new Error(`Request failed with status ${response.status}`);
@@ -1401,6 +1458,64 @@
                                     if (data.node && !routeTrail.includes(data.node)) {
                                         routeTrail.push(data.node);
                                         updateRouteIndicator(bot.routeIndicator, routeTrail);
+                                    }
+                                    continue;
+                                }
+                                if (data.event === 'scratchpad') {
+                                    // Display scratchpad step in the thinking accordion
+                                    if (data.step && bot.thinkingContent) {
+                                        // Show the accordion if it's hidden
+                                        if (bot.thinkingAccordion && bot.thinkingAccordion.style.display === 'none') {
+                                            bot.thinkingAccordion.style.display = 'block';
+                                        }
+
+                                        const thinkingSteps = bot.thinkingContent.querySelector('.thinking-steps');
+                                        if (thinkingSteps) {
+                                            const stepDiv = document.createElement('div');
+                                            stepDiv.style.cssText = 'padding: 4px 0; border-left: 2px solid var(--border); padding-left: 8px; margin-bottom: 6px;';
+                                            stepDiv.textContent = data.step;
+                                            thinkingSteps.appendChild(stepDiv);
+
+                                            // Scroll the message into view
+                                            bot.li.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if (data.event === 'user_input_request') {
+                                    // Planning mode needs user input - display prompt and enable input
+                                    if (data.question) {
+                                        bot.bubble.innerHTML = '<div style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; border-left: 3px solid var(--accent);">' +
+                                            '<div style="font-weight: 600; margin-bottom: 8px;">🤔 Need Your Input</div>' +
+                                            '<div>' + data.question + '</div>' +
+                                            '</div>';
+
+                                        // Show scratchpad if present
+                                        if (data.scratchpad && data.scratchpad.length > 0) {
+                                            const scratchpadDiv = document.createElement('div');
+                                            scratchpadDiv.style.cssText = 'margin-top: 12px; font-size: 12px; color: var(--text-tertiary);';
+                                            scratchpadDiv.innerHTML = '<div style="font-weight: 600; margin-bottom: 4px;">Planning Steps:</div>';
+                                            const stepsList = document.createElement('ul');
+                                            stepsList.style.cssText = 'list-style: none; padding-left: 0;';
+                                            data.scratchpad.forEach(step => {
+                                                const li = document.createElement('li');
+                                                li.textContent = '• ' + step;
+                                                li.style.cssText = 'margin-bottom: 2px;';
+                                                stepsList.appendChild(li);
+                                            });
+                                            scratchpadDiv.appendChild(stepsList);
+                                            bot.bubble.appendChild(scratchpadDiv);
+                                        }
+
+                                        // Set flag so next user message continues the planning conversation
+                                        awaitingUserInput = true;
+
+                                        // Enable input field (it's now expecting user response)
+                                        const input = document.querySelector('.chat-input');
+                                        if (input) {
+                                            input.placeholder = 'Answer the question above...';
+                                            input.focus();
+                                        }
                                     }
                                     continue;
                                 }

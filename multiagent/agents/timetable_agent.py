@@ -38,7 +38,7 @@ class TimetableAgentBuilder:
         self.parser = PydanticOutputParser(pydantic_object=CourseTimetableList)
         self.prompt = self._build_prompt()
         self.fallback_prompt = self._build_fallback_prompt()
-        self.checkpointer = MemorySaver()
+        # Removed MemorySaver - conversation context now passed via messages from wrapper
         
         # Preprocess course data for better matching
         self._preprocess_course_data()
@@ -614,7 +614,7 @@ Do not explain anything. Just output valid JSON.
         return create_react_agent(
             model=self.llm,
             tools=tools,
-            checkpointer=self.checkpointer,
+            # No checkpointer - stateless agent receives context via messages
             name="Timetable Agent",
         )
 

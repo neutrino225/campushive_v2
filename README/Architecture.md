@@ -98,14 +98,61 @@ v
 
 ### 2.4. Intelligence Layer (Multi-Agent Core)
 
-- **Orchestration**: LangGraph (`multiagent/graph/supervisor.py`)
-  - The `SupervisorState` TypedDict defines the shared state that flows through the graph, including the user's question, conversation history, and any file-based context.
-- **Routing**: LLM-based classifiers (`multiagent/routing/classifiers.py`) with keyword-based fallbacks determine the user's intent and route the query to the appropriate subgraph (e.g., `student` or `faculty`).
-- **Agents (`multiagent/agents/`)**:
-  - `RAGEngine`: Handles general knowledge questions using the main university vector store.
-  - `DegreeAdvisorAgent`: Answers queries about degree programs.
-  - `FacultyAgent`: Provides specific information about faculty members using structured tools.
-- **Conversation Memory (`multiagent/memory/manager.py`)**: A thread-safe manager that loads conversation history from the database into a short-term memory for the agents to use, ensuring contextual follow-up answers.
+#### Dual-Mode Supervisor Architecture
+
+The system employs two supervisor modes that work together:
+
+**A. Planning Supervisor (`multiagent/graph/planning_supervisor.py`)**
+
+- **Purpose**: Handles complex, multi-step queries requiring user clarification or sequential tool calls
+- **Implementation**: LangGraph ReAct agent with MemorySaver checkpointer
+- **Features**:
+  - Human-in-the-loop support with state resumption
+  - Scratchpad for visible reasoning steps
+  - Tool delegation to domain-specific agents
+  - Complexity detection via LLM classification
+- **Tools**: `query_student_domain`, `query_faculty_domain`, `query_exam_domain`, `request_clarification`
+- **When Used**: User-specific requests (timetables with electives), multi-step aggregation, conditional queries
+
+**B. Legacy Hierarchical Supervisor (`multiagent/graph/supervisor.py`)**
+
+- **Purpose**: Fast path for simple, direct queries
+- **Implementation**: Command-based delegation pattern with LangGraph
+- **Features**:
+  - Single LLM call for routing decision
+  - Direct delegation to worker nodes
+  - Lower latency for straightforward queries
+- **When Used**: Simple lookups, greetings, single-domain questions
+
+**Integration**: `supervisor.py` serves as the entry point, delegating to `planning_supervisor` for complex queries or routing directly for simple ones.
+
+#### Domain Supervisors & Agents
+
+**Student Domain (`multiagent/graph/student_supervisor.py`)**
+
+- Routes to: `general_info`, `timetable`, `degree_advisor`
+- Handles: Admissions, courses, programs, schedules, facilities
+
+**Faculty Domain (`multiagent/graph/faculty_supervisor.py`)**
+
+- Uses: `FacultyReactAgent` with structured tools
+- Handles: Faculty info, contact details, OBE mappings
+
+**Specialized Agents (`multiagent/agents/`)**:
+
+- `general_agent.py`: General university information (RAG-based)
+- `degree_advisor_agent.py`: Degree programs, semester courses (RAG-based)
+- `timetable_agent.py`: Course schedules, room assignments (CSV + fuzzy matching)
+- `faculty_react_agent.py`: Faculty queries with tools (ReAct pattern)
+- `exam_react_agent.py`: Exam generation with context awareness (ReAct pattern)
+- `obe_agent/`: CLO-PLO mappings and outcome-based education
+
+**Conversation Memory (`multiagent/memory/manager.py`)**:
+
+- Thread-safe manager with safeguards (max_sessions=1000, TTL=24h)
+- Auto-cleanup of stale sessions
+- Context passing to all agents (last N turns)
+- Loads history from database for persistent memory across sessions
 
 ### 2.5. Data & Retrieval Layer (RAG)
 
@@ -116,29 +163,68 @@ v
 
 ## 3. Core Data Flows
 
-### 3.1. Standard Chat Message
+### 3.1. Standard Chat Message (Simple Query)
 
-1.  **Frontend**: User sends a message. A `POST` request is made to `/api/v1/multiagent/invoke` with the question and session ID.
-2.  **Backend**: The `invoke_multiagent` endpoint authenticates the user and loads the conversation history from the database into the `MemoryManager`.
-3.  **Agent Core**: The supervisor graph is invoked with the user's question and conversation history.
-4.  **Routing**: The supervisor's router classifies the intent and passes the state to a subgraph (e.g., `student_node`).
-5.  **Delegation**: The subgraph's router further refines the intent and delegates to a specialized agent (e.g., `RAGEngine`).
-6.  **Retrieval & Generation**: The agent retrieves relevant information from its vector store, synthesizes an answer with the LLM, and returns the result.
-7.  **Response**: The result propagates back up the graph, is streamed back to the frontend, and the message exchange is saved to the database.
+1.  **Frontend**: User sends a message. A `POST` request is made to `/api/v1/multiagent/chat` with the question and session ID.
+2.  **Backend**: The endpoint authenticates the user and loads conversation history from database into `MemoryManager`.
+3.  **Complexity Detection**: System determines if query is SIMPLE or COMPLEX using LLM-based classification.
+4.  **For SIMPLE queries**:
+    - Supervisor analyzes question via single LLM call
+    - Returns `Command(goto=worker_agent)` to delegate directly
+    - Worker executes (e.g., `general_info_node` → `RAGEngine`)
+    - Agent retrieves from vector store, synthesizes answer with LLM
+5.  **Response**: Result streams back to frontend, saved to database
 
-### 3.2. Chat Message with File Upload
+### 3.2. Complex Query with Planning Mode
 
-This flow extends the standard flow by injecting file content as context.
+1.  **Frontend**: User sends complex request (e.g., "I'm in 7th semester BS AI, give me my timetable")
+2.  **Backend**: Loads history, detects COMPLEX via LLM
+3.  **Planning Supervisor**: ReAct agent activates with scratchpad
+4.  **Multi-Step Execution**:
+    - Step 1: Calls `query_student_domain("What courses in 7th semester BS AI?")`
+    - Step 2: Observes result has electives → needs clarification
+    - Step 3: Calls `request_clarification("Which electives?")` → Returns `__AWAITING_USER_INPUT__` marker
+5.  **Human-in-the-Loop**:
+    - System pauses, saves state to LangGraph checkpointer
+    - Frontend receives `awaiting_user_input: true` event
+    - Displays "🤔 Need Your Input" prompt
+    - User responds with electives
+6.  **State Resumption**:
+    - Frontend sends response with `user_input_mode: true`
+    - Backend loads checkpointed state via `agent.aget_state()`
+    - Appends user message, calls `agent.aupdate_state()`
+    - Resumes execution with full context
+7.  **Continuation**:
+    - Agent continues with user's info
+    - Calls additional tools as needed
+    - Synthesizes final answer
+8.  **Response**: Complete result with scratchpad steps, streamed to frontend, saved to database
 
-1.  **Frontend**: User selects a file and types a message. On send:
-    a. A `POST` request containing the file is sent to `/api/v1/chats/{session_id}/upload`.
-    b. The backend saves the file to `data/uploads/<session_id>/` and creates a record in the `UploadedFile` database table, returning a `file_id`.
-    c. A `POST` request is sent to `/api/v1/multiagent/invoke` with the question, session ID, and the new `file_id`.
-2.  **Backend**: The `invoke_multiagent` endpoint receives the `file_id`. It queries the database to find the file's path.
-3.  **Parsing**: It calls `document_parser.parse_document()` to extract the text content from the file.
-4.  **Agent Core**: The supervisor graph is invoked with the standard state **plus** the extracted text in the `file_context` field.
-5.  **Contextual Invocation**: The agent nodes (e.g., `student_node`) check for `file_context`. If present, they prepend the document's content to the user's question, forming an "enhanced question."
-6.  **Response**: The agent processes the enhanced question, using the provided text as primary context. The rest of the flow proceeds as normal.
+### 3.3. Recent System Improvements (Oct 2025)
+
+#### A. Memory System Enhancements
+
+- **Safeguards Added**: max_sessions=1000, session_ttl_hours=24
+- **Auto-cleanup**: Stale session removal, LRU eviction
+- **Monitoring**: `get_memory_stats()` for system health
+
+#### B. Planning Mode Human-in-the-Loop Fix
+
+- **Problem**: Agent would restart from scratch after user provided clarification
+- **Solution**:
+  - LangGraph state resumption with `aget_state`/`aupdate_state`
+  - Frontend tracks `awaitingUserInput` flag, sends `user_input_mode: true`
+  - System prompt enhanced to prevent echoing user input
+- **Result**: Seamless multi-turn clarification conversations
+
+#### C. Tool Usage Cleanup
+
+- **Problem**: Planning supervisor was using web search for university data, causing hallucinations
+- **Solution**:
+  - Removed `query_web_search` from available tools
+  - Updated prompt: ALL university data goes through `query_student_domain`
+  - Clear tool responsibility boundaries
+- **Result**: No more fabricated timetables or course data
 
 ## 4. Future Development Plan
 

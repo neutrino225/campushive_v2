@@ -899,7 +899,7 @@ class FacultyReactAgentBuilder:
 
     def __init__(self):
         self.fac = FacultyAgent(debug=False)
-        self.checkpointer = MemorySaver()
+        # Removed MemorySaver - conversation context now passed via messages from wrapper
         self.system_prompt_text = (
             "You are a precise university faculty assistant for FAST-NU (Islamabad).\n"
             "Tool selection policy:\n"
@@ -1156,7 +1156,7 @@ class FacultyReactAgentBuilder:
         return create_react_agent(
             model=llm,
             tools=tools,
-            checkpointer=self.checkpointer,
+            # No checkpointer - stateless agent receives context via messages
             name="Faculty Agent",
         )
 

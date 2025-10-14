@@ -6,27 +6,33 @@ CampusHive is a hierarchical multi-agent university assistant using LangGraph fo
 
 ## Architecture & Data Flow
 
-### Multi-Agent Hierarchy (LangGraph)
+### Multi-Agent Hierarchy (LangGraph) - Delegation Pattern
 
 ```
-User Question → Supervisor Router → Student Path    → [General RAG | Degree Advisor | Timetable]
-                                  → Faculty Path    → [Faculty Agent w/ tools]
-                                  → Direct Path     → [LLM w/ conversation context]
+User Question → Supervisor (LLM Router) → Command.goto(agent) → Worker Agents
+                                                               ↓
+                            Student Agent (subgraph) ← [General RAG | Degree Advisor | Timetable]
+                            Faculty Agent (ReAct)    ← [Tools: email, dept, research, etc.]
+                            Exam Agent (ReAct)       ← [Quiz/Exam generation, faculty/admin only]
+                            OBE Agent (custom)       ← [CLO-PLO mapping]
+                                                               ↓
+                                                       Return result to END
 ```
 
 **Critical Files:**
 
-- `multiagent/graph/supervisor.py` - Top-level router with async streaming
-- `multiagent/nodes/student.py` - Student subgraph routing
-- `multiagent/routing/classifiers.py` - LLM-based classification with keyword fallback
+- `multiagent/graph/supervisor.py` - Delegation-based supervisor with LLM router node
+- `multiagent/nodes/student.py` - Student subgraph with internal routing
+- `multiagent/agents/` - All specialized worker agents (faculty, exam, obe)
 - `multiagent/memory/manager.py` - Thread-safe conversation memory (max 10 turns/session)
 
-**Routing Logic:**
+**Delegation Pattern:**
 
-- Uses LLM classifiers (`classify_supervisor`, `classify_student`) with strict label validation
-- Falls back to keyword heuristics on LLM failure
-- Routes "direct" for greetings, thanks, follow-ups, reformatting (uses conversation context)
-- Classifiers have in-memory caching to reduce API calls
+- Supervisor makes **one LLM call** to decide which agent handles the query
+- Returns `Command(goto=agent_name)` to delegate control (no nested ReAct loops)
+- Worker nodes wrap agents and execute them with conversation context
+- Each worker returns complete state with result and updated route
+- Simpler and more reliable than tool-based handoffs with nested agents
 
 ### Vector Store Management (RAG)
 
@@ -96,18 +102,35 @@ Only use fallbacks for semantic "not found" cases (e.g., `NOT_FOUND_IN_DOCUMENTS
 
 **State Classes:**
 
-- `SupervisorState` (TypedDict): `question`, `result`, `route`, `session_id`, `conversation_history`
+- `SupervisorState` (TypedDict): `question`, `result`, `route`, `session_id`, `conversation_history`, `user_role`, `messages`
 - `ConversationState` (Dict): Used in subgraphs
 - Always pass `session_id` through state for memory tracking
 
-**Streaming Pattern:**
+**Delegation Pattern - Supervisor Node:**
 
 ```python
-async def node_function(state: State, config: RunnableConfig = None) -> AsyncGenerator[State, None]:
-    partial_result = ""
-    for chunk in agent.stream_answer(question):
-        partial_result += chunk
-        yield {**state, "result": partial_result, "route": current_route + ["agent_name"]}
+async def supervisor_node(state: SupervisorState):
+    """Simple LLM-based router - no ReAct loops."""
+    # Single LLM call for decision
+    response = await llm.ainvoke([SystemMessage(...), HumanMessage(state["question"])])
+    decision = response.content.strip().lower()
+
+    # Direct Command return
+    return Command(goto=decision, update={**state, "route": [...], "messages": [...]})
+```
+
+**Worker Node Pattern:**
+
+```python
+async def worker_node(state: SupervisorState):
+    """Execute agent and return complete state."""
+    result = agent.execute(state["question"])
+    return {
+        **state,
+        "result": result,
+        "route": state["route"] + ["agent_name:completed"],
+        "messages": state["messages"] + [AIMessage(content=result)]
+    }
 ```
 
 ### LLM Configuration (`config.py`)

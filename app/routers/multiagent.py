@@ -13,6 +13,7 @@ from sqlalchemy import func
 # Import application dependencies (auth + db models)
 from app.auth import get_current_user
 from app.database import get_db, ChatSession, ChatMessage, User
+from app.utils.titles import generate_chat_title
 
 # Add root directory to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -30,6 +31,7 @@ class ChatRequest(BaseModel):
     question: str
     session_id: str | int = "default"  # Can be string or int (DB session ID)
     stream: bool = True
+    user_input_mode: bool = False  # Set to True when resuming after awaiting_user_input
     
     def get_session_id_str(self) -> str:
         """Convert session_id to string for internal use."""
@@ -94,11 +96,19 @@ async def load_history_into_memory(session_id: str, user_id: int, db: Session) -
         memory_manager.add_turn(session_id, user_msg, agent_msg, route)
 
 
-async def stream_supervisor_response(question: str, session_id: str = "default", current_user: User | None = None, db: Session | None = None) -> AsyncGenerator[str, None]:
+async def stream_supervisor_response(
+    question: str, 
+    session_id: str = "default", 
+    current_user: User | None = None, 
+    db: Session | None = None,
+    user_input_mode: bool = False
+) -> AsyncGenerator[str, None]:
     """
     Streams the response from the supervisor graph, yielding intermediate steps and the final result.
+    For planning mode queries, may yield scratchpad steps and user input requests.
     """
     from multiagent.memory import memory_manager
+    from multiagent.graph.supervisor import run_supervisor_async
     
     # Load conversation history from database into memory if we have DB access
     if db is not None and current_user is not None:
@@ -108,53 +118,48 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
     final_response = ""
     
     try:
-        # Initialize state with session information
-        initial_state = {
-            "question": question,
-            "session_id": session_id,
-            "user_role": (current_user.role if current_user is not None else "student"),
-            "route": [],
-            "result": "",
-            "conversation_history": []
-        }
+        # Use run_supervisor_async which handles planning mode internally
+        user_role = (current_user.role if current_user is not None else "student")
+        result = await run_supervisor_async(
+            question, 
+            session_id, 
+            user_role=user_role,
+            user_input_mode=user_input_mode
+        )
         
-        # Use the supervisor_graph.astream_events for more granular streaming
-        async for event in supervisor_graph.astream_events(initial_state, version="v1"):
-            kind = event["event"]
-            if kind == "on_chain_end":
-                # The final answer is in the `on_chain_end` event
-                # for the 'student' or 'faculty' nodes
-                node_name = event["name"]
-                if node_name in ["student", "faculty", "direct", "exam"]:
-                    data = event["data"].get("output")
-                    if data and "result" in data:
-                        final_state.update(data)
-                        final_response = data["result"]
-                        response_data = {
-                            "response": data["result"],
-                            "route": data.get("route", []),
-                            "session_id": session_id
-                        }
-                        yield f"data: {json.dumps(response_data)}\n\n"
-            elif kind == "on_chain_stream":
-                # Stream partial results
-                node_name = event["name"]
-                if node_name in ["student", "faculty", "direct", "exam"]:
-                    data = event["data"].get("chunk")
-                    if data and "result" in data:
-                        response_data = {
-                            "response": data["result"],
-                            "route": data.get("route", []),
-                            "session_id": session_id
-                        }
-                        yield f"data: {json.dumps(response_data)}\n\n"
-            elif kind == "on_chain_start":
-                # Yield intermediate steps
-                node_name = event["name"]
-                if node_name in ["student", "faculty", "direct", "exam", "router"]:
-                     yield f"data: {json.dumps({'event': 'step', 'node': node_name, 'session_id': session_id})}\n\n"
-
-            await asyncio.sleep(0.01)  # Prevent blocking
+        # Check if waiting for user input (planning mode)
+        if result.get("awaiting_user_input"):
+            # Yield scratchpad steps first
+            for step in result.get("scratchpad", []):
+                yield f"data: {json.dumps({'event': 'scratchpad', 'step': step, 'session_id': session_id})}\n\n"
+            
+            # Yield user input request
+            yield f"data: {json.dumps({'event': 'user_input_request', 'question': result.get('response'), 'awaiting_user_input': True, 'planning_mode': True, 'route': result.get('route', []), 'session_id': session_id})}\n\n"
+            
+            # Don't persist yet - waiting for user response
+            return
+        
+        # Regular response - yield it
+        final_state = result
+        final_response = result.get("result", "")
+        
+        # Yield scratchpad if present (planning mode completed)
+        if result.get("scratchpad"):
+            for step in result.get("scratchpad", []):
+                yield f"data: {json.dumps({'event': 'scratchpad', 'step': step, 'session_id': session_id})}\n\n"
+        
+        # Yield route steps
+        for route_step in result.get("route", []):
+            yield f"data: {json.dumps({'event': 'step', 'node': route_step, 'session_id': session_id})}\n\n"
+        
+        # Yield final response
+        response_data = {
+            "response": final_response,
+            "route": result.get("route", []),
+            "planning_mode": result.get("planning_mode", False),
+            "session_id": session_id
+        }
+        yield f"data: {json.dumps(response_data)}\n\n"
 
         # Store the conversation turn in memory after streaming is complete
         if final_response:
@@ -209,26 +214,7 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
                     msg_count = db.query(func.count(ChatMessage.id)).filter(ChatMessage.session_id == session.id).scalar() or 0
                     title = None
                     if msg_count <= 2:
-                        # Summarize from this first user/agent pair
-                        user_text = user_message
-                        agent_text = agent_response
-                        # Lightweight summarizer mirroring chats.py helper
-                        source = (user_text or agent_text or "").strip()
-                        source = " ".join(source.split())
-                        lower = source.lower()
-                        for p in ["please", "can you", "could you", "i want", "i need", "how do i", "how to", "what is", "tell me", "help me"]:
-                            if lower.startswith(p + " "):
-                                source = source[len(p)+1:]
-                                break
-                        cut_points = ["?", ".", "!"]
-                        cut_idx = min([source.find(c) for c in cut_points if c in source] or [len(source)])
-                        snippet = source[:cut_idx]
-                        words = snippet.split()
-                        if len(words) > 10:
-                            words = words[:10]
-                        title = (" ".join(words) or source[:50]).strip()
-                        if title:
-                            title = title[:1].upper() + title[1:]
+                        title = generate_chat_title(user_message, agent_response)
                     return session.id, title
 
                 session_row_id, auto_title = await asyncio.to_thread(_persist_sync, db, current_user.id, session_id, question, final_response, route)
@@ -279,7 +265,13 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
     if request.stream:
         # Use StreamingResponse for real-time updates
         return StreamingResponse(
-            stream_supervisor_response(question, session_id, current_user=current_user, db=db),
+            stream_supervisor_response(
+                question, 
+                session_id, 
+                current_user=current_user, 
+                db=db,
+                user_input_mode=request.user_input_mode
+            ),
             media_type="text/event-stream",
         )
     else:
@@ -287,7 +279,29 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
         try:
             # Use the async version directly
             from multiagent.graph.supervisor import run_supervisor_async
-            result = await run_supervisor_async(question, session_id, user_role=(current_user.role if current_user is not None else "student"))
+            
+            # Check if this is a user input resumption (not implemented yet, will add in next step)
+            user_input_mode = request.user_input_mode if hasattr(request, 'user_input_mode') else False
+            
+            result = await run_supervisor_async(
+                question, 
+                session_id, 
+                user_role=(current_user.role if current_user is not None else "student"),
+                user_input_mode=user_input_mode
+            )
+
+            # Check if planning mode is waiting for user input
+            if result.get("awaiting_user_input"):
+                # Don't persist to DB yet - waiting for user response
+                # Return special response with scratchpad
+                return {
+                    "response": result.get("response"),
+                    "awaiting_user_input": True,
+                    "scratchpad": result.get("scratchpad", []),
+                    "route": result.get("route", []),
+                    "planning_mode": True,
+                    "session_id": session_id
+                }
 
             # Persist result to DB (create/find session and store both user and agent messages)
             try:
@@ -332,22 +346,7 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
                         msg_count = db.query(func.count(ChatMessage.id)).filter(ChatMessage.session_id == session.id).scalar() or 0
                         title = None
                         if msg_count <= 2:
-                            source = (user_message or agent_response or "").strip()
-                            source = " ".join(source.split())
-                            lower = source.lower()
-                            for p in ["please", "can you", "could you", "i want", "i need", "how do i", "how to", "what is", "tell me", "help me"]:
-                                if lower.startswith(p + " "):
-                                    source = source[len(p)+1:]
-                                    break
-                            cut_points = ["?", ".", "!"]
-                            cut_idx = min([source.find(c) for c in cut_points if c in source] or [len(source)])
-                            snippet = source[:cut_idx]
-                            words = snippet.split()
-                            if len(words) > 10:
-                                words = words[:10]
-                            title = (" ".join(words) or source[:50]).strip()
-                            if title:
-                                title = title[:1].upper() + title[1:]
+                            title = generate_chat_title(user_message, agent_response)
                         return session.id, title
 
                     _sid, auto_title = await asyncio.to_thread(_persist_sync, db, current_user.id, session_id, question, result.get("result", ""), result.get("route", []))
