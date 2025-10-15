@@ -1,0 +1,30 @@
+# Test Course Syllabus
+
+## Course Learning Outcomes (CLOs)
+
+1. **CLO-1**: Analyze complex software systems and identify design patterns using critical thinking skills.
+2. **CLO-2**: Design and implement scalable software architectures applying industry best practices.
+3. **CLO-3**: Evaluate different software development methodologies and select appropriate approaches for projects.
+4. **CLO-4**: Create comprehensive technical documentation explaining system architecture and implementation decisions.
+
+## Program Learning Outcomes (PLOs)
+
+1. **PLO-1**: An ability to analyze problems and identify computing requirements appropriate to their solutions.
+2. **PLO-2**: An ability to design, implement, and evaluate computing-based solutions to meet a given set of requirements.
+3. **PLO-3**: An ability to communicate effectively with various stakeholders.
+4. **PLO-4**: An ability to function effectively as a member or leader of a team engaged in activities appropriate to the program's discipline.
+
+## Course Topics
+
+- Software Design Patterns (Creational, Structural, Behavioral)
+- Architectural Patterns (MVC, Microservices, Event-Driven)
+- Software Development Methodologies (Agile, Waterfall, DevOps)
+- System Documentation and Technical Writing
+- Code Quality and Best Practices
+
+## Assessment Methods
+
+- Midterm Exam (30%)
+- Final Exam (40%)
+- Project (20%)
+- Assignments (10%)

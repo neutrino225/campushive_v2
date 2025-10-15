@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from typing import Dict, Any, Literal
+import logging
 
 # Add the root directory to the Python path so we can import from root modules
 root_dir = Path(__file__).parent.parent.parent
@@ -16,6 +17,9 @@ from ..agents.faculty_react_agent import FacultyAgent, FacultyReactAgentBuilder
 from ..agents.obe_agent.obe_agent import OBEAgent
 from config import llm
 from ..routing.classifiers import classify_faculty
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 
 class ConversationState(Dict[str, Any]):
@@ -107,6 +111,8 @@ def build_faculty_graph():
     def obe_mapping_node(state: ConversationState, config: RunnableConfig = None) -> ConversationState:
         """Handle CLO-PLO mapping requests."""
         question = state.get("question", "")
+        session_id = state.get("session_id")
+        user_id = state.get("user_id")
         
         try:
             if obe_agent is None:
@@ -116,35 +122,80 @@ def build_faculty_graph():
             clos = _extract_outcomes(question, "clo")
             plos = _extract_outcomes(question, "plo")
             
+            logger.info(f"[FACULTY DEBUG] Extracted from question: clos={clos}, plos={plos}")
+            logger.info(f"[FACULTY DEBUG] user_id={user_id}, session_id={session_id}")
+            logger.info(f"[FACULTY DEBUG] Condition check: not clos={not clos}, not plos={not plos}, has user_id={bool(user_id)}, has session_id={bool(session_id)}")
+            
+            # If we don't have CLOs/PLOs from the question, try to extract from uploaded documents
+            if (not clos or not plos) and user_id and session_id:
+                logger.info(f"[FACULTY DEBUG] Calling extract_outcomes_from_document...")
+                extraction_result = obe_agent.extract_outcomes_from_document(
+                    user_id=user_id, 
+                    session_id=str(session_id)
+                )
+                logger.info(f"[FACULTY DEBUG] Extraction result: {extraction_result}")
+                
+                if "error" not in extraction_result:
+                    if not clos and extraction_result.get("clos"):
+                        clos = extraction_result["clos"]
+                    if not plos and extraction_result.get("plos"):
+                        plos = extraction_result["plos"]
+            
             # If we have both CLOs and PLOs, generate the mapping
             if clos and plos:
-                result = obe_agent.run(clos=clos, plos=plos)
+                result = obe_agent.run(
+                    clos=clos, 
+                    plos=plos, 
+                    user_id=user_id, 
+                    session_id=str(session_id) if session_id else None
+                )
                 return {**state, "result": result}
             
-            # Otherwise, provide instructions
-            instructions = (
-                "I can help you map Course Learning Outcomes (CLOs) to Program Learning Outcomes (PLOs).\n\n"
-                "To use this feature, please provide:\n"
-                "1. A list of CLOs (Course Learning Outcomes)\n"
-                "2. A list of PLOs (Program Learning Outcomes)\n\n"
-                "I will then generate a mapping table showing which CLOs align with which PLOs, "
-                "along with justifications for each mapping.\n\n"
-                "Example format:\n"
-                "```\n"
-                "Map these outcomes:\n\n"
-                "CLOs:\n"
-                "- CLO 1: Understand basic algorithms\n"
-                "- CLO 2: Implement data structures\n\n"
-                "PLOs:\n"
-                "- PLO 1: Apply knowledge of computing fundamentals\n"
-                "- PLO 2: Design and develop solutions\n"
-                "```"
-            )
+            # If still no outcomes, provide instructions
+            if user_id and session_id:
+                instructions = (
+                    "I can help you map Course Learning Outcomes (CLOs) to Program Learning Outcomes (PLOs).\n\n"
+                    "I tried to extract CLOs and PLOs from your uploaded document, but couldn't find them. "
+                    "Please either:\n"
+                    "1. Upload a course outline/syllabus document that contains CLOs and PLOs, or\n"
+                    "2. Provide them directly in your message\n\n"
+                    "Example format:\n"
+                    "```\n"
+                    "Map these outcomes:\n\n"
+                    "CLOs:\n"
+                    "- CLO 1: Understand basic algorithms\n"
+                    "- CLO 2: Implement data structures\n\n"
+                    "PLOs:\n"
+                    "- PLO 1: Apply knowledge of computing fundamentals\n"
+                    "- PLO 2: Design and develop solutions\n"
+                    "```"
+                )
+            else:
+                instructions = (
+                    "I can help you map Course Learning Outcomes (CLOs) to Program Learning Outcomes (PLOs).\n\n"
+                    "To use this feature, please provide:\n"
+                    "1. A list of CLOs (Course Learning Outcomes)\n"
+                    "2. A list of PLOs (Program Learning Outcomes)\n\n"
+                    "I will then generate a mapping table showing which CLOs align with which PLOs, "
+                    "along with justifications for each mapping.\n\n"
+                    "Example format:\n"
+                    "```\n"
+                    "Map these outcomes:\n\n"
+                    "CLOs:\n"
+                    "- CLO 1: Understand basic algorithms\n"
+                    "- CLO 2: Implement data structures\n\n"
+                    "PLOs:\n"
+                    "- PLO 1: Apply knowledge of computing fundamentals\n"
+                    "- PLO 2: Design and develop solutions\n"
+                    "```"
+                )
             
             return {**state, "result": instructions}
             
         except Exception as e:
-            return {**state, "result": f"Error processing OBE mapping request: {str(e)}"}
+            import traceback
+            error_details = traceback.format_exc()
+            return {**state, "result": f"Error processing OBE mapping request: {str(e)}\n\nDetails: {error_details}"}
 
     def faculty_info_node(state: ConversationState, config: RunnableConfig = None) -> ConversationState:
         question = state.get("question", "")

@@ -24,9 +24,48 @@ from vector_store_manager import VectorStoreManager, VectorStoreType
 # ============================================================================
 
 @tool
+def search_uploaded_lecture_content(query: str, user_id: int, session_id: str) -> str:
+    """
+    Search through uploaded lecture slides, notes, or course materials for relevant content.
+    Use this to understand what topics were covered and get inspiration from actual lecture content.
+    
+    Args:
+        query: What to search for (e.g., "networking protocols", "machine learning algorithms")
+        user_id: The user's ID
+        session_id: The session ID where documents were uploaded
+    
+    Returns:
+        Relevant content from uploaded course materials
+    """
+    try:
+        from multiagent.memory.retriever_manager import get_session_retriever
+        
+        retriever = get_session_retriever(user_id, session_id)
+        
+        if not retriever:
+            return "❌ No course materials uploaded yet. Please upload lecture slides or notes first to generate contextual exam questions."
+        
+        # Retrieve relevant chunks
+        docs = retriever.get_relevant_documents(query)
+        
+        if not docs:
+            return f"No content found for '{query}' in uploaded materials."
+        
+        # Format results
+        content_parts = []
+        for i, doc in enumerate(docs[:5], 1):  # Top 5 most relevant chunks
+            source = doc.metadata.get("source", "Unknown")
+            content_parts.append(f"--- From {source} (Section {i}) ---\n{doc.page_content}")
+        
+        return "\n\n".join(content_parts)
+    except Exception as e:
+        return f"Error retrieving uploaded content: {e}"
+
+
+@tool
 def search_exam_inspiration(course: str, topic: str = "", difficulty: str = "Hard") -> str:
     """
-    Search for inspiration questions from past exams.
+    Search for inspiration questions from past exams database.
     
     Args:
         course: The course name (e.g., "Computer Networks", "Artificial Intelligence")
@@ -242,13 +281,61 @@ class ExamReactAgent:
     def __init__(self):
         """Initialize the exam ReAct agent with memory."""
         self.checkpointer = MemorySaver()
+        self.current_user_id = None
+        self.current_session_id = None
         self.agent = self._create_agent()
     
     def _create_agent(self):
         """Create the ReAct agent with tools and system prompt."""
         
-        # Define tools
-        tools = [search_exam_inspiration, calculate_exam_marks, validate_exam_structure]
+        # Create tool wrapper that injects user context
+        @tool
+        def search_uploaded_content_wrapper(query: str) -> str:
+            """
+            Search through uploaded lecture slides, notes, or course materials.
+            Use this to understand what topics were covered and get inspiration from actual lecture content.
+            
+            Args:
+                query: What to search for (e.g., "networking protocols", "machine learning algorithms")
+            
+            Returns:
+                Relevant content from uploaded course materials
+            """
+            try:
+                from multiagent.memory.retriever_manager import get_session_retriever
+                
+                # Use stored user context
+                if self.current_user_id is None or self.current_session_id is None:
+                    return "⚠️ No user context available. Uploaded documents feature requires user authentication."
+                
+                retriever = get_session_retriever(self.current_user_id, self.current_session_id)
+                
+                if not retriever:
+                    return "❌ No course materials uploaded yet. Please upload lecture slides or notes first to generate contextual exam questions."
+                
+                # Retrieve relevant chunks
+                docs = retriever.get_relevant_documents(query)
+                
+                if not docs:
+                    return f"No content found for '{query}' in uploaded materials."
+                
+                # Format results
+                content_parts = []
+                for i, doc in enumerate(docs[:5], 1):  # Top 5 most relevant chunks
+                    source = doc.metadata.get("source", "Unknown")
+                    content_parts.append(f"--- From {source} (Section {i}) ---\n{doc.page_content}")
+                
+                return "\n\n".join(content_parts)
+            except Exception as e:
+                return f"Error retrieving uploaded content: {e}"
+        
+        # Define tools (with wrapper for uploaded content)
+        tools = [
+            search_uploaded_content_wrapper,  # Uses context from instance
+            search_exam_inspiration, 
+            calculate_exam_marks, 
+            validate_exam_structure
+        ]
         
         # Create the agent with checkpointer for memory
         return create_react_agent(
@@ -266,13 +353,16 @@ class ExamReactAgent:
 **YOUR PRIMARY TASK**: Generate complete, well-structured university exams based on user requirements.
 
 **IMPORTANT TOOL USAGE**:
+- You have access to `search_uploaded_lecture_content` to query uploaded course materials (lectures, slides, notes)
 - You have access to `search_exam_inspiration` to find past exam questions for inspiration
 - You have access to `calculate_exam_marks` to verify marks add up correctly
 - You have access to `validate_exam_structure` to verify your exam follows all rules
-- Use `search_exam_inspiration` ONLY to get ideas and inspiration for question styles
+- **PRIORITY**: Always check for uploaded lecture content first using `search_uploaded_lecture_content`
+- Use uploaded content to understand what topics were actually taught and generate contextual questions
+- Use `search_exam_inspiration` for question style ideas from past exams
 - NEVER include the raw tool output in your final exam
 - NEVER mention "Inspiration Question" or tool outputs in your response
-- Extract ideas from inspiration, then create NEW original questions
+- Extract ideas from both sources, then create NEW original questions based on the actual lecture content
 
 **EXAM STRUCTURE PATTERNS YOU MUST FOLLOW**:
 
@@ -375,6 +465,16 @@ After the exam questions, add a separate section:
 
 **YOUR PRIMARY TASK**: Generate realistic practice exams for university students.
 
+**IMPORTANT TOOL USAGE**:
+- You have access to `search_uploaded_lecture_content` to query uploaded course materials (lectures, slides, notes)
+- You have access to `search_exam_inspiration` to find past exam questions for inspiration
+- You have access to `validate_exam_structure` to verify your exam follows all rules
+- **PRIORITY**: Always check for uploaded lecture content first using `search_uploaded_lecture_content`
+- Use uploaded content to understand what topics were actually taught and generate contextual questions
+- Use `search_exam_inspiration` for question style ideas from past exams
+- NEVER include the raw tool output in your final exam
+- Extract ideas from both sources, then create NEW original questions based on the actual lecture content
+
 **EXAM STRUCTURE PATTERNS**:
 
 **FOR FINAL PRACTICE EXAMS (180 minutes, 100 marks)**:
@@ -419,7 +519,7 @@ Same as faculty exams - MCQs with A/B/C/D format, numbered questions (Q1, Q2, et
 - The user should ONLY see the clean exam paper, not validation messages or tool outputs
 """
     
-    def stream(self, question: str, session_id: str = "default", user_role: str = "student"):
+    def stream(self, question: str, session_id: str = "default", user_id: int = None, user_role: str = "student"):
         """
         Streaming version with TRUE token-level streaming.
         
@@ -432,11 +532,16 @@ Same as faculty exams - MCQs with A/B/C/D format, numbered questions (Q1, Q2, et
         Args:
             question: The user's question/request
             session_id: Unique session identifier for conversation memory
+            user_id: User ID for accessing uploaded documents
             user_role: "student" or "faculty"
         
         Yields:
             Individual tokens of the final exam
         """
+        # Store user context for tool access
+        self.current_user_id = user_id
+        self.current_session_id = session_id
+        
         # Configuration for memory checkpointing
         config = {"configurable": {"thread_id": f"exam_react::{session_id}"}}
         
@@ -525,7 +630,7 @@ Same as faculty exams - MCQs with A/B/C/D format, numbered questions (Q1, Q2, et
         except Exception as e:
             yield f"Error streaming exam: {e}"
     
-    async def stream_async(self, question: str, session_id: str = "default", user_role: str = "student") -> AsyncGenerator[str, None]:
+    async def stream_async(self, question: str, session_id: str = "default", user_id: int = None, user_role: str = "student") -> AsyncGenerator[str, None]:
         """
         Async streaming version with TRUE token-level streaming.
         
@@ -538,11 +643,16 @@ Same as faculty exams - MCQs with A/B/C/D format, numbered questions (Q1, Q2, et
         Args:
             question: The user's question/request
             session_id: Unique session identifier for conversation memory
+            user_id: User ID for accessing uploaded documents
             user_role: "student" or "faculty"
         
         Yields:
             Individual tokens of the final exam
         """
+        # Store user context for tool access
+        self.current_user_id = user_id
+        self.current_session_id = session_id
+        
         config = {"configurable": {"thread_id": f"exam_react::{session_id}"}}
         system_message = self._get_system_message(user_role)
         

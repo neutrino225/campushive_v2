@@ -133,12 +133,26 @@ def build_student_graph():
         question = state.get("question", "")
         session_id = state.get("session_id", "default")
         try:
-            agent = timetable_agent or _get_timetable_agent()
+            agent_builder = timetable_builder or TimetableAgentBuilder(
+                timetable_path=str(root_dir / "data" / "structured_timetable.csv"),
+                mapping_path=str(root_dir / "data" / "mappings.json"),
+            )
+            agent = agent_builder.get_agent()
+            
+            # Get the system prompt from the builder
+            system_prompt = getattr(agent_builder, 'system_prompt', '')
+            
             # Since it's a langgraph agent, we need to stream it
             final_answer = ""
             config_dict = {"configurable": {"thread_id": f"student_timetable::{session_id}"}}
+            
+            # Inject system prompt for intelligent agent behavior
+            messages = [HumanMessage(content=question)]
+            if system_prompt:
+                messages = [SystemMessage(content=system_prompt), HumanMessage(content=question)]
+            
             for step in agent.stream(
-                {"messages": [HumanMessage(content=question)]},
+                {"messages": messages},
                 config_dict,
                 stream_mode="values",
             ):

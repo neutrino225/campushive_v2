@@ -5,7 +5,7 @@ import json
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -45,11 +45,18 @@ async def load_history_into_memory(session_id: str, user_id: int, db: Session) -
     from multiagent.memory import memory_manager
     
     def _load_sync(db, user_id, external_session_id):
-        # Find the session
-        session = db.query(ChatSession).filter(
-            ChatSession.session_name == external_session_id,
-            ChatSession.user_id == user_id
-        ).first()
+        # Find the session by immutable DB id if numeric; otherwise by name (legacy)
+        session = None
+        if isinstance(external_session_id, str) and external_session_id.isdigit():
+            session = db.query(ChatSession).filter(
+                ChatSession.id == int(external_session_id),
+                ChatSession.user_id == user_id
+            ).first()
+        if session is None:
+            session = db.query(ChatSession).filter(
+                ChatSession.session_name == external_session_id,
+                ChatSession.user_id == user_id
+            ).first()
         
         if not session:
             return []
@@ -112,6 +119,7 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
         initial_state = {
             "question": question,
             "session_id": session_id,
+            "user_id": (current_user.id if current_user is not None else None),  # Add user_id
             "user_role": (current_user.role if current_user is not None else "student"),
             "route": [],
             "result": "",
@@ -165,13 +173,21 @@ async def stream_supervisor_response(question: str, session_id: str = "default",
             if db is not None and current_user is not None:
                 # Use a sync helper in a thread to avoid blocking event loop
                 def _persist_sync(db, user_id, external_session_id, user_message, agent_response, route):
-                    # Find or create ChatSession using the external session identifier as session_name
-                    session = db.query(ChatSession).filter(
-                        ChatSession.session_name == external_session_id,
-                        ChatSession.user_id == user_id
-                    ).first()
-                    if not session:
-                        session = ChatSession(user_id=user_id, session_name=external_session_id)
+                    # Find session by DB id when provided; otherwise fallback by name (legacy)
+                    session = None
+                    if isinstance(external_session_id, str) and external_session_id.isdigit():
+                        session = db.query(ChatSession).filter(
+                            ChatSession.id == int(external_session_id),
+                            ChatSession.user_id == user_id
+                        ).first()
+                    if session is None:
+                        session = db.query(ChatSession).filter(
+                            ChatSession.session_name == external_session_id,
+                            ChatSession.user_id == user_id
+                        ).first()
+                    if session is None:
+                        # As a safety net, create a session with a safe default name rather than numeric id
+                        session = ChatSession(user_id=user_id, session_name="New Chat")
                         db.add(session)
                         db.commit()
                         db.refresh(session)
@@ -268,8 +284,9 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Chat session not found or access denied"
                 )
-            # Use the session_name as the internal session_id
-            session_id = session.session_name
+            # CRITICAL FIX: Use immutable session.id instead of mutable session_name
+            # session_name changes after auto-titling, breaking vector store lookup
+            session_id = str(session.id)
         except ValueError:
             pass  # Not a valid integer, treat as regular string session_id
     
@@ -404,3 +421,65 @@ async def get_memory_stats():
         "active_sessions": memory_manager.get_session_count(),
         "session_ids": memory_manager.get_all_sessions()
     }
+
+
+@router.get("/download-timetable/{filename}")
+async def download_timetable(
+    filename: str,
+):
+    """
+    Download exported timetable files (CSV or Excel).
+    
+    Args:
+        filename: The filename to download (e.g., 'timetable_20251016_143022.csv')
+        current_user: Authenticated user (required)
+    
+    Returns:
+        FileResponse with the requested file
+    
+    Raises:
+        HTTPException 404: File not found
+        HTTPException 403: Invalid file type or path traversal attempt
+    """
+    import os
+    from pathlib import Path
+    
+    # Security: Validate filename to prevent path traversal
+    if '..' in filename or '/' in filename or '\\' in filename:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid filename"
+        )
+    
+    # Only allow CSV and Excel files
+    allowed_extensions = {'.csv', '.xlsx'}
+    file_ext = Path(filename).suffix.lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only CSV and Excel files can be downloaded"
+        )
+    
+    # Construct the full file path
+    export_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'timetable_exports')
+    file_path = os.path.join(export_dir, filename)
+    
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    # Determine media type
+    media_type = "text/csv" if file_ext == '.csv' else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    
+    # Return the file for download
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )

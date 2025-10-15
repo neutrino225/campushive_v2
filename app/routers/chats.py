@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List
@@ -14,6 +14,8 @@ from app.schemas import (
 from app.auth import get_current_user
 import logging
 import json
+import mimetypes
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +123,10 @@ async def create_chat_session(
     
     - **session_name**: Name for the chat session
     """
+    safe_name = session_data.session_name or "New Chat"
     new_session = ChatSession(
         user_id=current_user.id,
-        session_name=session_data.session_name
+        session_name=safe_name
     )
     
     db.add(new_session)
@@ -333,3 +336,163 @@ async def delete_chat_session(
     )
     
     return {"status": "success", "message": "Chat session deleted"}
+
+
+@router.post("/{session_id}/upload", status_code=status.HTTP_200_OK)
+async def upload_document(
+    session_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Upload a document to a chat session for context-aware responses.
+    
+    Supported formats: .txt, .md, .pdf, .doc, .docx
+    
+    The document will be:
+    1. Parsed to extract text
+    2. Chunked into smaller pieces
+    3. Embedded using the project's embedding model
+    4. Stored in a session-specific vector store
+    5. Made available to all agents for RAG operations
+    """
+    from multiagent.utils.document_parser import parse_document, is_supported_file
+    from multiagent.memory.retriever_manager import get_session_retriever_manager
+    
+    # Verify session exists and belongs to user
+    session = db.query(ChatSession).filter(
+        ChatSession.id == session_id,
+        ChatSession.user_id == current_user.id
+    ).first()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat session not found"
+        )
+    
+    # Validate file type
+    if not is_supported_file(file.filename):
+        from multiagent.utils.document_parser import get_supported_extensions
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type. Supported formats: {', '.join(get_supported_extensions())}"
+        )
+    
+    # File size limit (10 MB)
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB in bytes
+    file_size = 0
+    
+    # Check Content-Length header if available
+    if hasattr(file, 'size') and file.size:
+        file_size = file.size
+    else:
+        # Read file size by seeking to end
+        try:
+            file_content = await file.read()
+            file_size = len(file_content)
+            # Reset file pointer for later reading
+            await file.seek(0)
+        except Exception as e:
+            logger.error(f"Error checking file size: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to check file size"
+            )
+    
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum size allowed: {MAX_FILE_SIZE // (1024*1024)} MB"
+        )
+    
+    # MIME type validation
+    allowed_mime_types = {
+        '.txt': ['text/plain'],
+        '.md': ['text/plain', 'text/markdown'],
+        '.pdf': ['application/pdf'],
+        '.doc': ['application/msword'],
+        '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document']
+    }
+    
+    # Get file extension
+    _, ext = os.path.splitext(file.filename.lower())
+    
+    # Get MIME type from file content
+    detected_mime = mimetypes.guess_type(file.filename)[0]
+    
+    # Also check Content-Type header if available
+    content_type = getattr(file, 'content_type', None) or getattr(file, 'headers', {}).get('content-type')
+    
+    # Validate MIME type
+    expected_mimes = allowed_mime_types.get(ext, [])
+    if expected_mimes:
+        mime_valid = False
+        
+        # Check detected MIME type
+        if detected_mime and detected_mime in expected_mimes:
+            mime_valid = True
+        
+        # Check Content-Type header
+        if content_type and content_type in expected_mimes:
+            mime_valid = True
+        
+        if not mime_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid MIME type for {ext} file. Expected: {', '.join(expected_mimes)}"
+            )
+    
+    # Read file content for parsing
+    try:
+        # Reset file pointer to beginning (in case it was read before)
+        await file.seek(0)
+        file_content = await file.read()
+    except Exception as e:
+        logger.error(f"Error reading file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to read file"
+        )
+    
+    # Parse document to extract text
+    try:
+        text_content = parse_document(file_content, file.filename)
+    except Exception as e:
+        logger.error(f"Error parsing document: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse document: {str(e)}"
+        )
+    
+    # Ingest document into session-specific vector store
+    try:
+        manager = get_session_retriever_manager()
+        # CRITICAL FIX: Use immutable session.id instead of mutable session_name
+        # session_name changes after auto-titling, breaking vector store lookup
+        result = manager.ingest_document(
+            user_id=current_user.id,
+            session_id=str(session.id),  # Use immutable DB ID for consistent path
+            text_content=text_content,
+            filename=file.filename
+        )
+        
+        logger.info(
+            f"User {current_user.username} uploaded '{file.filename}' "
+            f"to session ID {session.id} (name: {session.session_name}) - {result['chunks_created']} chunks"
+        )
+        
+        return {
+            "status": "success",
+            "message": "Document uploaded and processed successfully",
+            "filename": file.filename,
+            "chunks_created": result["chunks_created"]
+        }
+    
+    except Exception as e:
+        logger.error(f"Error ingesting document: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process document: {str(e)}"
+        )

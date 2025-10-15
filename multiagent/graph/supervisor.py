@@ -450,6 +450,7 @@ def build_supervisor_graph():
         current_route = state.get("route", [])
         user_role = state.get("user_role", "student")
         session_id = state.get("session_id", "default")
+        user_id = state.get("user_id", None)  # Get user_id from state
 
         # Instantiate exam agent lazily
         nonlocal exam_agent
@@ -465,7 +466,12 @@ def build_supervisor_graph():
             # Stream the exam generation with full conversational context
             # The ReAct agent handles memory automatically through its checkpointer
             partial_result = ""
-            async for chunk in exam_agent.stream_async(question, session_id=session_id, user_role=user_role):
+            async for chunk in exam_agent.stream_async(
+                question, 
+                session_id=session_id, 
+                user_id=user_id,  # Pass user_id for uploaded document access
+                user_role=user_role
+            ):
                 partial_result += chunk
                 # Yield intermediate states for streaming
                 yield {**state, "result": partial_result, "route": current_route + ["exam_react_agent"]}

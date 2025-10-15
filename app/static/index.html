@@ -670,6 +670,151 @@
             height: 20px;
         }
 
+        /* File Upload Styles */
+        .file-upload-btn {
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: var(--radius-sm);
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+
+        .file-upload-btn:hover:not(:disabled) {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .file-upload-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .file-upload-btn svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        .file-upload-input {
+            display: none;
+        }
+
+        .uploaded-file-indicator {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 0;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 8px 12px;
+            font-size: 13px;
+            color: var(--text-primary);
+            box-shadow: var(--shadow);
+            gap: 8px;
+            align-items: center;
+            z-index: 10;
+        }
+
+        .uploaded-file-indicator.show {
+            display: flex;
+        }
+
+        .file-icon {
+            width: 16px;
+            height: 16px;
+            color: var(--text-secondary);
+        }
+
+        .file-name {
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-remove-btn {
+            background: none;
+            border: none;
+            color: var(--text-tertiary);
+            cursor: pointer;
+            padding: 0;
+            margin-left: 8px;
+            display: flex;
+            align-items: center;
+            transition: color 0.2s;
+        }
+
+        .file-remove-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .file-remove-btn svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .upload-status-toast {
+            position: fixed;
+            bottom: 100px;
+            right: 24px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 16px 20px;
+            box-shadow: var(--shadow);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            gap: 12px;
+            min-width: 300px;
+        }
+
+        .upload-status-toast.show {
+            display: flex;
+        }
+
+        .upload-status-icon {
+            width: 20px;
+            height: 20px;
+            flex-shrink: 0;
+        }
+
+        .upload-status-icon.processing {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            from {
+                transform: rotate(0deg);
+            }
+
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .upload-status-text {
+            flex: 1;
+            font-size: 14px;
+        }
+
+        .upload-status-text .status-title {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .upload-status-text .status-detail {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
         /* Auth Modal */
         .modal-overlay {
             position: fixed;
@@ -903,7 +1048,31 @@
 
         <div class="input-area">
             <div class="input-wrapper">
+                <!-- Uploaded file indicator -->
+                <div class="uploaded-file-indicator" id="file-indicator">
+                    <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                        <polyline points="13 2 13 9 20 9" />
+                    </svg>
+                    <span class="file-name" id="file-name">No file</span>
+                    <button class="file-remove-btn" id="remove-file-btn" type="button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                    </button>
+                </div>
+
                 <form class="input-form" id="chat-form">
+                    <!-- File upload button -->
+                    <button class="file-upload-btn" id="file-upload-btn" type="button" title="Upload document">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path
+                                d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                        </svg>
+                    </button>
+                    <input type="file" class="file-upload-input" id="file-input" accept=".txt,.md,.pdf,.doc,.docx">
+
                     <textarea class="input-textarea" id="question" placeholder="Message CampusHive..." rows="1"
                         required></textarea>
                     <button class="send-btn" id="send-btn" type="submit">
@@ -912,6 +1081,18 @@
                         </svg>
                     </button>
                 </form>
+            </div>
+        </div>
+
+        <!-- Upload status toast -->
+        <div class="upload-status-toast" id="upload-toast">
+            <svg class="upload-status-icon" id="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+            </svg>
+            <div class="upload-status-text">
+                <div class="status-title" id="upload-status-title">Uploading...</div>
+                <div class="status-detail" id="upload-status-detail">Processing document</div>
             </div>
         </div>
     </div>
@@ -1340,7 +1521,7 @@
 
             if (!currentSession) {
                 try {
-                    const name = `Chat ${new Date().toLocaleString()}`;
+                    const name = 'New Chat';
                     await createSession(name);
                 } catch (e) {
                     console.error('Failed to create session', e);
@@ -1364,7 +1545,7 @@
                     headers: authHeaders(),
                     body: JSON.stringify({
                         question,
-                        session_id: currentSession ? currentSession.session_name : null,
+                        session_id: currentSession ? currentSession.id : null,
                         stream: true
                     })
                 });
@@ -1404,7 +1585,7 @@
                                     }
                                     continue;
                                 }
-                                if (data.event === 'title' && data.title && currentSession && data.session_id === currentSession.session_name) {
+                                if (data.event === 'title' && data.title && currentSession && String(data.session_id) === String(currentSession.id)) {
                                     // Update the list item's title and header if present
                                     const li = chatList.querySelector(`[data-session-id="${currentSession.id}"]`);
                                     if (li) {
@@ -1510,13 +1691,149 @@
             }
         }
 
-        form.addEventListener('submit', handleSubmit);
+        // File upload functionality
+        const fileUploadBtn = document.getElementById('file-upload-btn');
+        const fileInput = document.getElementById('file-input');
+        const fileIndicator = document.getElementById('file-indicator');
+        const fileName = document.getElementById('file-name');
+        const removeFileBtn = document.getElementById('remove-file-btn');
+        const uploadToast = document.getElementById('upload-toast');
+        const uploadIcon = document.getElementById('upload-icon');
+        const uploadTitle = document.getElementById('upload-status-title');
+        const uploadDetail = document.getElementById('upload-status-detail');
+
+        let selectedFile = null;
+
+        // File button click → trigger hidden input
+        fileUploadBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            fileInput.click();
+        });
+
+        // File selected → show indicator
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                // Validate file size (10MB max)
+                if (file.size > 10 * 1024 * 1024) {
+                    showUploadToast('File too large', 'Maximum file size is 10MB', 'error');
+                    setTimeout(() => hideUploadToast(), 5000);
+                    fileInput.value = '';
+                    return;
+                }
+
+                // Validate file type
+                const allowedTypes = ['.txt', '.md', '.pdf', '.doc', '.docx'];
+                const fileExt = '.' + file.name.split('.').pop().toLowerCase();
+                if (!allowedTypes.includes(fileExt)) {
+                    showUploadToast('Invalid file type', `Only ${allowedTypes.join(', ')} files are allowed`, 'error');
+                    setTimeout(() => hideUploadToast(), 5000);
+                    fileInput.value = '';
+                    return;
+                }
+
+                selectedFile = file;
+                fileName.textContent = file.name;
+                fileIndicator.style.display = 'flex';
+            }
+        });
+
+        // Remove file → hide indicator
+        removeFileBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            selectedFile = null;
+            fileInput.value = '';
+            fileIndicator.style.display = 'none';
+        });
+
+        // Upload file function
+        async function uploadFile(file, sessionId) {
+            showUploadToast('Uploading...', `Processing ${file.name}`, 'processing');
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await fetch(`/chats/${sessionId}/upload`, {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + getToken() },
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Upload failed');
+                }
+
+                const result = await response.json();
+                showUploadToast('Success!', `${result.chunks_created} chunks created from ${result.filename}`, 'success');
+
+                // Clear file selection
+                selectedFile = null;
+                fileInput.value = '';
+                fileIndicator.style.display = 'none';
+
+                // Hide toast after 3 seconds
+                setTimeout(() => hideUploadToast(), 3000);
+
+                return result;
+
+            } catch (error) {
+                console.error('Upload error:', error);
+                showUploadToast('Upload failed', error.message, 'error');
+                setTimeout(() => hideUploadToast(), 5000);
+                throw error;
+            }
+        }
+
+        function showUploadToast(title, detail, status) {
+            uploadTitle.textContent = title;
+            uploadDetail.textContent = detail;
+            uploadIcon.className = `upload-status-icon ${status}`;
+
+            // Update icon based on status
+            if (status === 'processing') {
+                uploadIcon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>';
+            } else if (status === 'success') {
+                uploadIcon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+            } else if (status === 'error') {
+                uploadIcon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
+            }
+
+            uploadToast.classList.add('show');
+        }
+
+        function hideUploadToast() {
+            uploadToast.classList.remove('show');
+        }
+
+        // Modified handleSubmit to upload file first if selected
+        async function handleSubmitWithUpload(event) {
+            event.preventDefault();
+
+            // Upload file first if selected
+            if (selectedFile && currentSession) {
+                try {
+                    await uploadFile(selectedFile, currentSession.id);
+                    // Wait a bit for upload to complete before sending message
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                } catch (error) {
+                    console.error('File upload failed:', error);
+                    // Continue with message even if upload failed
+                }
+            }
+
+            // Then proceed with original message handling
+            await handleSubmit(event);
+        }
+
+        form.addEventListener('submit', handleSubmitWithUpload);
         input.focus();
 
         const newChatBtn = document.getElementById('new-chat-btn');
         newChatBtn.addEventListener('click', async () => {
             try {
-                const name = `Chat ${new Date().toLocaleString()}`;
+                const name = 'New Chat';
                 await createSession(name);
             } catch (e) {
                 console.error('create session failed', e);
