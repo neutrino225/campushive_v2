@@ -128,7 +128,7 @@ def parse_program_markdown(md: str, html: str = None):
     for line in md.splitlines():
         s = line.strip()
         if s.startswith("# "):
-            title = s.lstrip("# ").strip()
+            2 = s.lstrip("# ").strip()
             break
         if s.startswith("## "):
             title = s.lstrip("# ").strip()

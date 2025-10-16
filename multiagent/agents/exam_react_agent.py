@@ -55,7 +55,7 @@ def search_uploaded_lecture_content(query: str, user_id: int, session_id: str) -
 
         # Format results
         content_parts = []
-        for i, doc in enumerate(docs[:5], 1):  # Top 5 most relevant chunks
+        for i, doc in enumerate(docs[:10], 1):  # Top 5 most relevant chunks
             source = doc.metadata.get("source", "Unknown")
             content_parts.append(
                 f"--- From {source} (Section {i}) ---\n{doc.page_content}"
@@ -154,7 +154,7 @@ def calculate_exam_marks(exam_text: str) -> str:
 
     total = sum(all_marks)
 
-    result = f"📊 MARKS BREAKDOWN:\n"
+    result = f"MARKS BREAKDOWN:\n"
     if section_a_marks > 0:
         result += f"  Section A: {section_a_marks} marks\n"
     if section_b_marks > 0:
@@ -164,10 +164,10 @@ def calculate_exam_marks(exam_text: str) -> str:
     result += f"  TOTAL: {total} marks\n"
 
     # Validation hints
-    if total == 100:
-        result += "✅ Total matches Final Exam (100 marks)"
+    if 150 >= total >= 100:
+        result += "Total matches Final Exam (100-150 marks)"
     elif total == 50:
-        result += "✅ Total matches Sessional Exam (50 marks)"
+        result += "Total matches Sessional Exam (50 marks)"
     else:
         result += f"⚠️ Total is {total} marks (Expected: 50 or 100)"
 
@@ -183,8 +183,8 @@ def validate_exam_structure(
 
     Args:
         exam_text: The generated exam text to validate
-        exam_type: Type of exam ("final" for 100 marks or "sessional" for 50 marks)
-        total_marks: Expected total marks
+        exam_type: Type of exam ("final" or "sessional")
+        total_marks: Expected total marks (for reference only, validation is flexible)
 
     Returns:
         Validation result with pass/fail and specific issues found
@@ -194,90 +194,90 @@ def validate_exam_structure(
 
     # Check for tool output leakage
     if "Inspiration Question" in exam_text or "--- Inspiration" in exam_text:
-        issues.append("❌ Tool output visible")
-        checks.append("❌ Clean output (tool outputs hidden)")
+        issues.append("Tool output visible")
+        checks.append("Clean output (tool outputs hidden)")
     else:
-        checks.append("✅ Clean output (tool outputs hidden)")
+        checks.append("Clean output (tool outputs hidden)")
 
     # Check for answer blanks
     if "Answer:" in exam_text or "_______" in exam_text:
-        issues.append("❌ Answer blanks found")
-        checks.append("❌ No answer blanks")
+        issues.append("Answer blanks found")
+        checks.append("No answer blanks")
     else:
-        checks.append("✅ No answer blanks")
+        checks.append("No answer blanks")
 
     # Check for section structure
     has_section_a = bool(re.search(r"Section\s+A", exam_text, re.IGNORECASE))
     has_section_b = bool(re.search(r"Section\s+B", exam_text, re.IGNORECASE))
 
     if not has_section_a:
-        issues.append("❌ Missing Section A (MCQs)")
-        checks.append("❌ Section A (MCQs)")
+        issues.append("Missing Section A (MCQs)")
+        checks.append("Section A (MCQs)")
     else:
-        checks.append("✅ Section A (MCQs)")
+        checks.append("Section A (MCQs)")
 
     if not has_section_b:
-        issues.append("❌ Missing Section B (Short/Medium Questions)")
-        checks.append("❌ Section B (Short/Medium)")
+        issues.append("Missing Section B (Short/Medium Questions)")
+        checks.append("Section B (Short/Medium)")
     else:
-        checks.append("✅ Section B (Short/Medium)")
+        checks.append("Section B (Short/Medium)")
 
-    # For final exams, check Section C
-    if exam_type == "final" and total_marks >= 100:
+    # For final exams, ALWAYS require Section C (3-section structure)
+    if exam_type == "final":
         has_section_c = bool(re.search(r"Section\s+C", exam_text, re.IGNORECASE))
         if not has_section_c:
-            issues.append("❌ Missing Section C (Long Questions)")
-            checks.append("❌ Section C (Long Questions)")
+            issues.append("Missing Section C (Long Questions) - Final exams must have 3 sections")
+            checks.append("Section C (Long Questions)")
         else:
-            checks.append("✅ Section C (Long Questions)")
+            checks.append("Section C (Long Questions)")
 
     # Check MCQ format (should have A. B. C. D. options)
     if has_section_a:
         mcq_pattern = r"[A-D]\.\s+.+"
         mcq_options = re.findall(mcq_pattern, exam_text)
         if len(mcq_options) < 4:
-            issues.append("❌ MCQs don't follow A/B/C/D format")
-            checks.append("❌ MCQ format (A/B/C/D)")
+            issues.append("MCQs don't follow A/B/C/D format")
+            checks.append("MCQ format (A/B/C/D)")
         else:
-            checks.append("✅ MCQ format (A/B/C/D)")
+            checks.append("MCQ format (A/B/C/D)")
 
     # Check for marks allocation
     marks_pattern = r"\[(\d+)\s*marks?\]|\((\d+)\s*marks?\)"
     marks_found = re.findall(marks_pattern, exam_text, re.IGNORECASE)
     if not marks_found:
-        issues.append("⚠️ No marks allocation found")
-        checks.append("❌ Marks allocation")
+        issues.append("No marks allocation found")
+        checks.append("Marks allocation")
     else:
         # Calculate total marks
         all_marks = [int(m[0] or m[1]) for m in marks_found]
         calculated_total = sum(all_marks)
-        if abs(calculated_total - total_marks) > 5:  # Allow 5 mark tolerance
-            issues.append(f"❌ Marks mismatch: {calculated_total} vs {total_marks}")
-            checks.append(
-                f"❌ Total marks ({calculated_total} vs {total_marks} expected)"
-            )
+
+        # For flexible total marks, just check that marks are allocated (not strict matching)
+        if calculated_total <= 0:
+            issues.append("Invalid marks allocation")
+            checks.append("Marks allocation")
         else:
-            checks.append(f"✅ Total marks ({calculated_total} marks)")
+            checks.append(f"Marks allocated (Total: {calculated_total} marks)")
 
     # Check for answer key (faculty only - check if present)
     has_answer_key = bool(
         re.search(r"ANSWER\s+KEY|Answer\s+Key", exam_text, re.IGNORECASE)
     )
     if has_answer_key:
-        checks.append("✅ Answer key included")
+        checks.append("Answer key included")
 
     # Build result with progressive checks
-    result = "🔍 VALIDATION CHECKS:\n" + "\n".join(checks)
+    result = "VALIDATION CHECKS:\n" + "\n".join(checks)
 
     # Summary
     if not issues:
-        result += "\n\n✅ ALL CHECKS PASSED - Exam is ready!"
+        result += "\n\nALL CHECKS PASSED - Exam is ready!"
         return result
     else:
         result += (
-            "\n\n❌ ISSUES FOUND:\n"
+            "\n\n ISSUES FOUND:\n"
             + "\n".join(issues)
-            + "\n\n🔧 Fix these and validate again."
+            + "\n\n Fix these and validate again."
         )
         return result
 
@@ -410,23 +410,35 @@ class ExamReactAgent:
 - NEVER mention "Inspiration Question" or tool outputs in your response
 - Extract ideas from both sources, then create NEW original questions based on the actual lecture content
 
+**DEFAULT BEHAVIOR (when no specific format is requested)**:
+Generate a balanced exam with:
+- MCQs (Multiple Choice Questions) for fundamental concepts
+- Short/Medium Questions for understanding and application
+- This ensures comprehensive assessment unless user specifies otherwise
+
 **EXAM STRUCTURE PATTERNS YOU MUST FOLLOW**:
 
-**FOR FINAL EXAMS (180 minutes, 100 marks)**:
-- Section A (MCQs): 30-40 marks (~60 min)
-  • 15-20 multiple choice questions (2 marks each)
+**FOR FINAL EXAMS (any total marks, typically 100-150 marks)**:
+The exam MUST have 3 sections, with marks distributed appropriately:
+
+- Section A (MCQs): ~30-40% of total marks
+  • Multiple choice questions (adjust quantity based on total marks)
   • Cover fundamental concepts with challenging distractors
   • Each MCQ must have exactly 4 options (A, B, C, D)
+  • Example: For 100 marks → 15-20 MCQs (2 marks each)
+  • Example: For 150 marks → 20-25 MCQs (2-3 marks each)
 
-- Section B (Short/Medium Questions): 30-40 marks (~70 min)
-  • 4-6 questions (6-8 marks each)
-  • Require detailed explanations, calculations, comparisons
+- Section B (Short/Medium Questions): ~30-40% of total marks
+  • Questions requiring detailed explanations, calculations, comparisons
   • Test understanding and application
+  • Example: For 100 marks → 4-6 questions (6-8 marks each)
+  • Example: For 150 marks → 6-8 questions (6-8 marks each)
 
-- Section C (Long/Complex Questions): 20-30 marks (~50 min)
-  • 2-3 comprehensive questions (8-12 marks each)
-  • Multi-part questions with sub-parts (a), (b), (c)
+- Section C (Long/Complex Questions): ~20-30% of total marks
+  • Comprehensive questions with multi-part sub-questions (a), (b), (c)
   • Integration of concepts, real-world scenarios, critical thinking
+  • Example: For 100 marks → 2-3 questions (8-12 marks each)
+  • Example: For 150 marks → 3-4 questions (10-15 marks each)
 
 **FOR SESSIONAL/MIDTERM EXAMS (60 minutes, 50 marks)**:
 - Section A (MCQs): 20 marks (~20 min)
@@ -440,6 +452,10 @@ class ExamReactAgent:
 - Section C (Application): 10 marks (~15 min)
   • 1-2 problems (5-10 marks each)
   • Calculations or simple applications
+
+**FOR QUIZZES (20-30 minutes, approximately 15-20 total marks)**:
+- Primarily consist of **MCQs** and **2-3 Short Questions**.
+- Ensure total time is appropriate for the questions.
 
 **FORMATTING RULES (STRICTLY ENFORCE)**:
 1. **MCQs**: Use this exact format:
@@ -486,9 +502,11 @@ After the exam questions, add a separate section:
 - If user says "make it harder", increase difficulty of the EXISTING exam
 - Always maintain context from previous turns
 
-**HANDLING CONFLICTS**:
-- If user requests conflicting requirements (e.g., "50 marks" for a "final exam"), ASK for clarification
-- If user clarifies, REMEMBER their original request and apply the clarification
+**HANDLING USER REQUIREMENTS**:
+- If user specifies a format (e.g., "only MCQs", "only short questions"), follow their specification exactly
+- If user specifies total marks, distribute them across the 3 sections appropriately
+- If NO specific format is requested, generate a balanced exam with MCQs AND short questions (and long questions for final exams)
+- If user requests conflicting requirements, ASK for clarification
 
 **CRITICAL WORKFLOW** (FOLLOW THIS EXACTLY):
 1. Use `search_exam_inspiration` tool to get ideas (silently, internal use only)
@@ -500,7 +518,7 @@ After the exam questions, add a separate section:
 7. **ONLY AFTER VALIDATION PASSES**: Present the final, complete exam to the user
 
 **VALIDATION IS MANDATORY** (but silent to user):
-- Call `validate_exam_structure(exam_text=your_generated_exam, exam_type="final" or "sessional", total_marks=100 or 50)`
+- Call `validate_exam_structure(exam_text=your_generated_exam, exam_type="final" or "sessional", total_marks=expected_total_marks)`
 - If validation reports issues, fix them immediately WITHOUT showing the validation output to the user
 - Keep validating and fixing until all checks pass
 - Only present the FINAL, VALIDATED exam to the user
@@ -521,17 +539,28 @@ After the exam questions, add a separate section:
 - NEVER include the raw tool output in your final exam
 - Extract ideas from both sources, then create NEW original questions based on the actual lecture content
 
+**DEFAULT BEHAVIOR (when no specific format is requested)**:
+Generate a balanced practice exam with:
+- MCQs (Multiple Choice Questions) for fundamental concepts
+- Short/Medium Questions for understanding and application
+- This ensures comprehensive practice unless user specifies otherwise
+
 **EXAM STRUCTURE PATTERNS**:
 
-**FOR FINAL PRACTICE EXAMS (180 minutes, 100 marks)**:
-- Section A (MCQs): 30-40 marks (15-20 questions)
-- Section B (Short/Medium Questions): 30-40 marks (4-6 questions)
-- Section C (Long Questions): 20-30 marks (2-3 questions)
+**FOR FINAL PRACTICE EXAMS (any total marks, typically 100-150 marks)**:
+The exam should have 3 sections:
+- Section A (MCQs): ~30-40% of total marks
+- Section B (Short/Medium Questions): ~30-40% of total marks
+- Section C (Long Questions): ~20-30% of total marks
 
 **FOR SESSIONAL PRACTICE EXAMS (60 minutes, 50 marks)**:
 - Section A (MCQs): 20 marks (20 questions)
 - Section B (Short Answers): 20 marks (10 questions)
 - Section C (Application): 10 marks (1-2 problems)
+
+**FOR PRACTICE QUIZZES (20-30 minutes, approximately 15-20 total marks)**:
+- Primarily consist of **MCQs** and **2-3 Short Questions**.
+- Focus on recent or focused topics for quick self-assessment.
 
 **FORMATTING RULES**:
 Same as faculty exams - MCQs with A/B/C/D format, numbered questions (Q1, Q2, etc.)
@@ -547,6 +576,11 @@ Same as faculty exams - MCQs with A/B/C/D format, numbered questions (Q1, Q2, et
 - Handle modifications, clarifications, and follow-ups naturally
 - Maintain context from earlier turns
 
+**HANDLING USER REQUIREMENTS**:
+- If user specifies a format (e.g., "only MCQs", "only short questions"), follow their specification exactly
+- If NO specific format is requested, generate MCQs AND short questions for comprehensive practice
+- If user requests conflicting requirements, ASK for clarification
+
 **NOTE**: These are PRACTICE exams for studying, so they should be realistic but not identical to actual exams.
 
 **CRITICAL WORKFLOW** (FOLLOW THIS EXACTLY):
@@ -558,7 +592,7 @@ Same as faculty exams - MCQs with A/B/C/D format, numbered questions (Q1, Q2, et
 6. **ONLY AFTER VALIDATION PASSES**: Present the final, complete practice exam to the user
 
 **VALIDATION IS MANDATORY** (but silent to user):
-- Call `validate_exam_structure(exam_text=your_generated_exam, exam_type="final" or "sessional", total_marks=100 or 50)`
+- Call `validate_exam_structure(exam_text=your_generated_exam, exam_type="final" or "sessional", total_marks=expected_total_marks)`
 - If validation reports issues, fix them immediately WITHOUT showing the validation output to the user
 - Keep validating and fixing until all checks pass
 - Only present the FINAL, VALIDATED exam to the user

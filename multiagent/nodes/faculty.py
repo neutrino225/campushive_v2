@@ -16,6 +16,7 @@ from ..prompts.faculty_router import faculty_router_prompt
 from ..agents.faculty_react_agent import FacultyAgent, FacultyReactAgentBuilder
 from ..agents.obe_agent.react_obe_agent import OBEReactAgentBuilder
 from ..memory import session_context
+from ..memory.manager import memory_manager
 from config import llm
 from ..routing.classifiers import classify_faculty
 
@@ -257,7 +258,33 @@ def build_faculty_graph():
         session_id = state.get("session_id", "default")
         try:
             # Prefer the tool-enabled agent when available for better observability and tools
-            if react_agent is not None:
+            if react_builder is not None:
+                # Include recent conversation context to help resolve pronouns like "them"
+                prepared = question
+                try:
+                    if session_id is not None:
+                        ctx = memory_manager.get_last_context(str(session_id), last_n=5)
+                        if ctx:
+                            prepared = f"{ctx}\n{question}"
+                except Exception:
+                    prepared = question
+
+                # Use the builder's stream to ensure system prompt and finalization are applied
+                final_answer = ""
+                try:
+                    for chunk in react_builder.stream(prepared, session_id=str(session_id)):
+                        if isinstance(chunk, str):
+                            final_answer += chunk
+                except Exception:
+                    final_answer = ""
+
+                # Fallback to classic agent if builder returns empty
+                if not final_answer.strip():
+                    faculty_agent = agent or _get_faculty_agent()
+                    final_answer = faculty_agent.answer(question, stream=False)
+                answer = final_answer
+            elif react_agent is not None:
+                # Fallback to raw agent if builder is unavailable
                 final_answer = ""
                 config_dict = {
                     "configurable": {"thread_id": f"faculty_react_node::{session_id}"}

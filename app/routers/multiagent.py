@@ -401,6 +401,10 @@ async def chat_endpoint(
     else:
         # For non-streaming, run the supervisor and return the final result
         try:
+            # Make sure conversation history is loaded for non-streaming requests as well
+            if db is not None and current_user is not None:
+                await load_history_into_memory(session_id, current_user.id, db)
+
             # Use the async version directly
             from multiagent.graph.supervisor import run_supervisor_async
 

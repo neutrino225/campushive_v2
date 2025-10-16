@@ -6,6 +6,7 @@ import sys
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Callable, List, Dict, Any, Optional
+from datetime import datetime
 
 from langchain.agents import Tool
 from langgraph.prebuilt import create_react_agent
@@ -251,6 +252,121 @@ class FacultyAgent:
         else:
             lines.append(_norm_whitespace(_strip_html(str(items))))
         return lines
+
+    # ---------------- Publication helpers ----------------
+    def _parse_pub_date(self, it: Dict[str, Any]) -> Optional[tuple]:
+        """Return a sortable (year, month, day) tuple if any date info is present.
+
+        Tries common keys: Year/year, Date/date, PublicationDate, etc. Falls back to
+        extracting a 4-digit year from any stringly date fields. Missing parts default to 0.
+        """
+        if not isinstance(it, dict):
+            return None
+
+        # 1) Explicit year
+        year = it.get("Year") or it.get("year")
+        y = None
+        try:
+            if isinstance(year, (int, float)):
+                y = int(year)
+            elif isinstance(year, str) and year.strip().isdigit():
+                y = int(year.strip())
+        except Exception:
+            y = None
+
+        # 2) Try date-like fields
+        date_keys = [
+            "date", "Date", "publication_date", "PublicationDate",
+            "pub_date", "Published", "published"
+        ]
+
+        m = 0
+        d = 0
+
+        def _try_parse_datestr(s: str):
+            nonlocal y, m, d
+            s = _norm_whitespace(str(s))
+            if not s:
+                return
+            # Try ISO first
+            try:
+                dt = datetime.fromisoformat(s)  # e.g., 2023-05-11
+                y = dt.year
+                m = dt.month
+                d = dt.day
+                return
+            except Exception:
+                pass
+            # Extract YYYY, optional month/day
+            mobj = re.search(r"(20\d{2}|19\d{2})", s)
+            if mobj and not y:
+                try:
+                    y = int(mobj.group(1))
+                except Exception:
+                    y = None
+            # Month names
+            month_map = {
+                'jan':1,'january':1,'feb':2,'february':2,'mar':3,'march':3,
+                'apr':4,'april':4,'may':5,'jun':6,'june':6,'jul':7,'july':7,
+                'aug':8,'august':8,'sep':9,'sept':9,'september':9,
+                'oct':10,'october':10,'nov':11,'november':11,'dec':12,'december':12
+            }
+            for k,v in month_map.items():
+                if re.search(rf"\b{k}\b", s, flags=re.IGNORECASE):
+                    m = v
+                    break
+            # Day number (1-31)
+            dobj = re.search(r"\b([12]?\d|3[01])\b", s)
+            if dobj:
+                try:
+                    d = int(dobj.group(1))
+                except Exception:
+                    d = 0
+
+        for k in date_keys:
+            if k in it and it[k]:
+                _try_parse_datestr(it[k])
+
+        if y is not None:
+            return (y, m or 0, d or 0)
+        return None
+
+    def _sort_publications_latest_first(self, items: Any) -> List[Dict[str, Any]]:
+        """Sort a list of publication dicts by date desc; undated items go last preserving order."""
+        if not isinstance(items, list):
+            return []
+        dated: List[tuple] = []
+        undated: List[Dict[str, Any]] = []
+        for idx, it in enumerate(items):
+            if isinstance(it, dict):
+                key = self._parse_pub_date(it)
+                if key is not None:
+                    dated.append((key, idx, it))
+                else:
+                    undated.append(it)
+            else:
+                # Non-dict entries are treated as undated and kept as-is later
+                undated.append(it)
+        # Sort by year, month, day descending; if tie, keep original order by idx
+        dated.sort(key=lambda t: (t[0][0], t[0][1], t[0][2], -t[1]), reverse=True)
+        return [t[2] for t in dated] + undated
+
+    def _tool_latest_publications(self, person: Dict[str, Any], n: int = 1) -> Optional[str]:
+        items = person.get("listPublication") or []
+        if not items:
+            return None
+        sorted_items = self._sort_publications_latest_first(items)
+        if not sorted_items:
+            return None
+        n = max(1, int(n))
+        subset = sorted_items[:n]
+        lines = self._format_list_field(subset)
+        if not lines:
+            return None
+        hdr_n = "Latest publication" if n == 1 else f"Latest {n} publications"
+        header = f"{hdr_n} of {_faculty_display_name(person)}:"
+        body = "\n".join(f"{i+1}. {line}" for i, line in enumerate(lines))
+        return f"{header}\n{body}"
 
     # ---------------- Tool functions (structured fetchers) ----------------
     def _tool_email(self, person: Dict[str, Any]) -> Optional[str]:
@@ -527,6 +643,7 @@ class FacultyAgent:
                 tool_map = {
                     "email": self._tool_email,
                     "publications": self._tool_publications,
+                    "latest_publications": lambda p: self._tool_latest_publications(p, self._extract_publication_count(latest_query) or 1),
                     "education": self._tool_education,
                     "experience": self._tool_experience,
                     "designation": self._tool_designation,
@@ -546,6 +663,8 @@ class FacultyAgent:
                             direct = self._tool_publications_limited(person, count)
                         else:
                             direct = fn(person)
+                    elif field == "latest_publications":
+                        direct = fn(person)
                     else:
                         direct = fn(person)
                     if isinstance(direct, str) and direct.strip():
@@ -716,6 +835,9 @@ class FacultyAgent:
     # --------- Inference helpers ---------
     def _infer_field(self, text: str) -> Optional[str]:
         q = (text or "").lower()
+        # Latest publications intent must be detected before generic publications
+        if re.search(r"\b(latest|recent|newest|most\s*recent)\b", q) and re.search(r"\b(publications?|papers?|articles?)\b", q):
+            return "latest_publications"
         if re.search(r"\b(email|e-?mail|contact)\b", q):
             return "email"
         if re.search(r"\b(publications?|papers?|articles?)\b", q):
@@ -944,6 +1066,34 @@ class FacultyReactAgentBuilder:
                     pass
             return fac._tool_publications(p)
 
+        @tool("get_faculty_latest_publications")
+        def get_faculty_latest_publications(person_name: str) -> str:
+            """Return the latest publication(s) for the faculty member. Input: person_name (string).
+
+            If the dataset provides dates/years, ordering uses them. Otherwise, it returns the top entries as given.
+            After using this tool, always call finalize_answer with 'question\n\n---\n\ncontext' to produce the final reply.
+            """
+            p = fac._resolve_person(person_name)
+            if not p:
+                return "NOT_FOUND_IN_DOCUMENTS"
+            # Default latest 1
+            return fac._tool_latest_publications(p, 1) or "NOT_FOUND_IN_DOCUMENTS"
+
+        @tool("get_faculty_latest_publications_with_count")
+        def get_faculty_latest_publications_with_count(person_name: str, count: int) -> str:
+            """Return the latest 'count' publications for the faculty member. Inputs: person_name (string), count (int).
+
+            If the dataset provides dates/years, ordering uses them. Otherwise, it returns the top N entries as given.
+            After using this tool, always call finalize_answer with 'question\n\n---\n\ncontext' to produce the final reply.
+            """
+            p = fac._resolve_person(person_name)
+            if not p:
+                return "NOT_FOUND_IN_DOCUMENTS"
+            n = int(count) if isinstance(count, (int, str)) else 1
+            if n <= 0:
+                n = 1
+            return fac._tool_latest_publications(p, n) or "NOT_FOUND_IN_DOCUMENTS"
+
         @tool("get_faculty_publications_with_count")
         def get_faculty_publications_with_count(person_name: str, count: int) -> str:
             """Return only 'count' publications for the faculty member. Inputs: person_name (string), count (int).
@@ -1136,6 +1286,8 @@ class FacultyReactAgentBuilder:
 
         tools: List[Tool] = [
             get_faculty_email,
+            get_faculty_latest_publications_with_count,
+            get_faculty_latest_publications,
             get_faculty_publications_with_count,
             get_faculty_publications,
             get_faculty_education,
@@ -1169,7 +1321,8 @@ class FacultyReactAgentBuilder:
         This ensures the final text is always produced by the LLM using only tool-derived context, and
         respects requested counts (e.g., publications).
         """
-        config = {"configurable": {"thread_id": f"faculty_react::{session_id}"}}
+        # Use the same thread_id convention as the faculty node so memory persists across turns
+        config = {"configurable": {"thread_id": f"faculty_react_node::{session_id}"}}
         last_content = ""
         for step in self.agent.stream(
             {"messages": [
