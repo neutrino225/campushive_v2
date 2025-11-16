@@ -1,43 +1,78 @@
 from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHash
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-this-in-production-use-env-variable")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Initialize Argon2id hasher with OWASP recommended parameters
+ph = PasswordHasher(
+    time_cost=2,        # Number of iterations (OWASP: 2 minimum)
+    memory_cost=19456,  # 19 MiB memory (OWASP: 19 MiB minimum)
+    parallelism=1,      # Single thread
+    hash_len=32,        # 32-byte hash output
+    salt_len=16         # 16-byte salt
+)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verify a plain password against a hashed password.
+    Verify a password against its hash using Argon2id.
     
     Args:
-        plain_password: Plain text password to verify
-        hashed_password: Hashed password to compare against
-    
+        plain_password: The plaintext password to verify
+        hashed_password: The Argon2id hash to verify against
+        
     Returns:
-        True if password matches, False otherwise
+        bool: True if password matches, False otherwise
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        ph.verify(hashed_password, plain_password)
+        return True
+    except (VerifyMismatchError, VerificationError, InvalidHash) as e:
+        logger.debug(f"Password verification failed: {type(e).__name__}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error during password verification: {e}")
+        return False
 
 
 def get_password_hash(password: str) -> str:
     """
-    Hash a password for secure storage.
+    Hash a password using Argon2id with OWASP recommended parameters.
     
     Args:
-        password: Plain text password to hash
-    
+        password: The plaintext password to hash
+        
     Returns:
-        Hashed password string
+        str: The Argon2id hash string
     """
-    return pwd_context.hash(password)
+    return ph.hash(password)
+
+
+def needs_rehash(hashed_password: str) -> bool:
+    """
+    Check if a password hash needs to be rehashed with updated parameters.
+    
+    Args:
+        hashed_password: The hash to check
+        
+    Returns:
+        bool: True if rehashing is recommended, False otherwise
+    """
+    try:
+        return ph.check_needs_rehash(hashed_password)
+    except Exception:
+        # If check fails, assume rehash is needed
+        return True
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

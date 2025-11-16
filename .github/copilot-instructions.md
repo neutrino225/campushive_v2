@@ -1,81 +1,51 @@
-# CampusHive AI Coding Agent Instructions
+# CampusHive AI Coding Agent Guide
 
-## Project Overview
+Concise, actionable context for coding agents working on CampusHive.
 
-CampusHive is a hierarchical multi-agent university assistant. It uses LangGraph for agent orchestration, RAG for grounded answers, and FastAPI for authentication and chat persistence. The system routes user questions through a supervisor to specialized agents (student info, faculty info, degree programs), maintaining conversation memory for context.
+## 1. System Snapshot
+Hierarchical multi-agent university assistant: FastAPI backend (`app/`), LangGraph supervisor (`multiagent/graph/supervisor.py`), student & faculty subgraphs (`multiagent/nodes/`), centralized hybrid retrieval via `vector_store_manager.py`, SQLite persistence (`data/campushive.db`), session-scoped memory (`multiagent/memory/manager.py`).
 
-## Architecture & Data Flow
+## 2. Core Routing Rules
+Supervisor classifier → student | faculty | direct. Student subgraph classifier → general RAG vs degree advisor. Faculty node uses structured tools. Direct path handles greetings/thanks/reformat/follow-ups. Only fallback when semantic miss (`NOT_FOUND_IN_DOCUMENTS`); NEVER fallback on API/infra errors—re-raise.
 
-- **Supervisor Router** (`multiagent/graph/supervisor.py`): Top-level async router, streams results, injects conversation context for routing.
-- **Student/Faculty Subgraphs** (`multiagent/nodes/student.py`, `multiagent/nodes/faculty.py`): Route to specialized agents.
-- **Classifiers** (`multiagent/routing/classifiers.py`): LLM-based, strict label validation, keyword fallback, in-memory cache.
-- **Memory** (`multiagent/memory/manager.py`): Thread-safe, trims to last 10 turns/session.
-- **Vector Store** (`vector_store_manager.py`): Hybrid BM25+Vector+MMR retrieval, three store types (`GENERAL`, `DEGREE_PROGRAMS`, `FACULTY`), persists in `data/vector_stores/`.
-- **FastAPI Backend** (`app/main.py`): Handles auth, chat, and session persistence. SQLite DB at `data/campushive.db` (models in `app/database/models.py`).
+## 3. Memory & State
+Always propagate `session_id` (stringify via helper) through graph state. `MemoryManager` keeps last 10 turns (thread-safe `RLock`). Conversation history injected before routing for better intent classification; agents get trimmed history for contextual answers.
 
-**Routing:**
+## 4. Retrieval Pattern
+`VectorStoreManager` provides ensemble (BM25 + embeddings + MMR) retrievers per store type: `GENERAL`, `DEGREE_PROGRAMS`, `FACULTY` (stored under `data/vector_stores/`). Use `manager.get_retriever(VectorStoreType.GENERAL)`; prefer ensemble where grounded answers matter. Rebuild with `python vector_store_manager.py --action create --store-type faculty --force`.
 
-- LLM classifiers (`classify_supervisor`, `classify_student`) with strict label validation; fallback to keyword heuristics only on LLM failure.
-- "Direct" route for greetings, thanks, follow-ups, reformatting (uses conversation context).
-- Fallbacks are only for semantic "not found" (e.g., `NOT_FOUND_IN_DOCUMENTS`), never for API errors (see below).
+## 5. Key Files
+`config.py` model/embeddings (keep routing deterministic). `multiagent/routing/classifiers.py` strict label validation + keyword fallback. `multiagent/graph/supervisor.py` async streaming orchestrator. `multiagent/nodes/student.py` / `faculty.py` delegate to agents. `app/database/models.py` defines `User`, `ChatSession`, `ChatMessage`. Prompts in `multiagent/prompts/` are plain strings.
 
-## Key Workflows
+## 6. Common Workflows
+Env: `conda activate fyp` if Conda is still used; all installs & runs now go through `uv` for speed and reproducibility.
+Dependency install/update: `uv sync` (reads `pyproject.toml` / `requirements.txt`).
+Start API: `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+Init auth DB: `uv run python scripts/init_db.py && uv run python scripts/create_admin.py`.
+Run tests: `uv run pytest -q` (scope with `tests/agent_tests/` or `tests/api_tests/`).
+Rebuild stores: `uv run python scrapers/faculty_scraper.py` then `uv run python vector_store_manager.py --action create --store-type faculty --force`.
+Quick supervisor probe: `uv run python -c "from multiagent.graph.supervisor import run_supervisor; print(run_supervisor('Who is the head of computer science?'))"`.
+Pattern: replace bare `python/pytest/uvicorn` with `uv run <command>`; prefer `uv sync` over `pip install -r requirements.txt`.
 
-- **Run server:**
-  ```zsh
-  conda activate fyp
-  uvicorn app.main:app --host 0.0.0.0 --port 8000
-  # http://localhost:8000 (UI), http://localhost:8000/docs (API docs)
-  ```
-- **Test:**
-  ```zsh
-  pytest -q
-  pytest tests/agent_tests/
-  pytest tests/api_tests/
-  ```
-- **Rebuild vector stores:**
-  ```zsh
-  python scrapers/faculty_scraper.py
-  python vector_store_manager.py --action create --store-type faculty --force
-  ```
-- **DB migration/init:**
-  ```zsh
-  python scripts/init_db.py
-  python scripts/create_admin.py
-  ```
+## 7. Error Handling Conventions
+Agent/tool raises → bubble up unchanged. Only semantic-not-found triggers fallback classification or alternative retrieval. Never convert operational failures into content responses. Maintain streaming behavior where implemented (async generators).
 
-## Project Conventions & Patterns
+## 8. Patterns & Naming
+Agents: `*_agent.py`; nodes: `multiagent/nodes/`; graph: `multiagent/graph/`; routing/helpers: `multiagent/routing/`; memory: `multiagent/memory/`. Keep imports absolute (root on `sys.path`). Session IDs may arrive as int—normalize early.
 
-- **Error Handling:** Agents must re-raise API errors immediately; never fallback to secondary agents on API error. Only fallback for semantic "not found" (e.g., `NOT_FOUND_IN_DOCUMENTS`).
-- **State:** Always pass `session_id` through state for memory tracking. Use `SupervisorState` and `ConversationState` as defined in `multiagent/graph/supervisor.py` and subgraphs.
-- **Streaming:** Use async generators for streaming agent responses (see supervisor and node functions).
-- **LLM Config:** See `config.py` for model/embedding setup. Use deterministic settings for routing.
-- **Path Management:** Most files add root to `sys.path` for absolute imports (e.g., `from config import llm`).
-- **Memory:** `MemoryManager` trims to last 10 turns/session, uses `threading.RLock()` for thread safety.
-- **Session IDs:** Can be string or int; always convert to string internally (`get_session_id_str`).
-- **Prompts:** Plain strings in `multiagent/prompts/*.py`.
-- **File Naming:** Agents end with `_agent.py`, nodes in `nodes/`, graphs in `graph/`.
+## 9. File Upload Context (If Implemented)
+Uploaded file text (parsed) is appended to user question before routing; treat as ephemeral per turn, do NOT persist in long-term memory unless explicitly added.
 
-## Examples & References
+## 10. Extensibility Guidelines
+New intent → add classifier label (validate strictly), extend prompt, update keyword fallback list. New data domain → add enum in manager, processor, source directory under `data/`, rebuild store, expose via agent wrapper. Preserve deterministic routing configs when adding models.
 
-- **VectorStoreManager usage:**
-  ```python
-  manager = VectorStoreManager(embeddings=embeddings)
-  retriever = manager.get_retriever(VectorStoreType.GENERAL)
-  ```
-- **Chat history loading:**
-  ```python
-  from multiagent.memory import memory_manager
-  await load_history_into_memory(session_id, user_id, db)
-  ```
+## 11. Quick Usage Examples
+Retriever: `manager = VectorStoreManager(embeddings); retriever = manager.get_retriever(VectorStoreType.FACULTY)`. Memory access: `from multiagent.memory import memory_manager; memory_manager.get_history(session_id)`. Degree queries: delegate via student node; faculty structured queries go through `FacultyAgent` tools.
 
-## Documentation
+## 12. Do / Avoid
+Do: pass `session_id`; validate classifier labels; rebuild stores after scraper changes; use `uv sync` after dependency changes; prefix executions with `uv run`; keep prompts minimal & deterministic. Avoid: direct `pip install` / raw `python` without `uv run`; silent fallbacks on errors; expanding memory beyond 10 turns; mixing file context into persistent history; ad-hoc vector store creation outside manager.
 
-- Architecture: `README/Architecture.md`
-- Vector Stores: `README/README_vector_store_management.md`
-- Memory: `README/README_memory_system.md`
-- API/Auth: `README/README_API_testing.md`
+## 13. Reference Docs
+See `README/Architecture.md`, `README/README_memory_system.md`, `README/README_vector_store_management.md` for deeper details. Keep this file concise; update if workflows or routing contracts change.
 
-## Environment
-
-- **Always**: `conda activate fyp` before running terminal-based sessions.
+Feedback: suggest missing high-impact conventions or unclear sections; keep additions concrete and codebase-backed.
