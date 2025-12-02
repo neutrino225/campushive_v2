@@ -2,6 +2,17 @@ import uvicorn
 import argparse
 import os
 
+# Patch posthog to fix ChromaDB compatibility issue with PostHog 6.x+
+try:
+    import posthog
+    original_capture = posthog.capture
+    def patched_capture(*args, **kwargs):
+        # Completely silence telemetry
+        return
+    posthog.capture = patched_capture
+except ImportError:
+    pass
+
 # Disable ChromaDB telemetry to prevent posthog errors
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 

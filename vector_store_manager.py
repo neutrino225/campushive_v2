@@ -469,9 +469,9 @@ class VectorStoreManager:
                 data_source=os.path.join(base_data_dir, "faculty"),
                 chunk_size=800,
                 chunk_overlap=150,
-                bm25_k=12,
-                embed_k=12,
-                mmr_k=12,
+                bm25_k=25,  # Increased from 12 for better coverage
+                embed_k=25,  # Increased from 12 for better coverage
+                mmr_k=25,    # Increased from 12 for better coverage
                 ensemble_weights=(0.5, 0.3, 0.2)
             ),
             VectorStoreType.GENERAL: VectorStoreConfig(

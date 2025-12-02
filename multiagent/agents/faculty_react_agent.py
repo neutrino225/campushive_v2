@@ -992,6 +992,127 @@ class FacultyAgent:
         
         return matches
 
+    def _search_by_university(self, university_name: str) -> List[Dict[str, Any]]:
+        """Search for faculty members who have a degree from the specified university.
+        
+        Args:
+            university_name: The university/institute name to search for (e.g., "Bahria University", "NUST")
+            
+        Returns:
+            List of tuples (person_dict, degree_dict) for all matching degrees
+        """
+        if not university_name:
+            return []
+        
+        norm_uni = _norm_whitespace(university_name).lower()
+        matches = []
+        
+        for person in self.people:
+            education = person.get("listEEdu", [])
+            if not isinstance(education, list):
+                continue
+            
+            for degree in education:
+                if not isinstance(degree, dict):
+                    continue
+                institute = _norm_whitespace(str(degree.get("Degree_Institute") or "")).lower()
+                # Match if search term is in institute name or vice versa
+                if norm_uni in institute or institute in norm_uni:
+                    matches.append((person, degree))
+                    break  # Count each person only once
+        
+        return matches
+
+    def _search_by_degree_level(self, degree_level: str) -> List[Dict[str, Any]]:
+        """Search for faculty members by degree level (PhD, MS, BS, etc.).
+        
+        Args:
+            degree_level: The degree level to search for (e.g., "PhD", "MS", "Bachelor")
+            
+        Returns:
+            List of tuples (person_dict, degree_dict) for all matching degrees
+        """
+        if not degree_level:
+            return []
+        
+        norm_level = _norm_whitespace(degree_level).lower()
+        # Normalize common variations
+        level_map = {
+            "phd": ["phd", "ph.d", "doctorate", "doctor"],
+            "ms": ["ms", "m.s", "master", "masters"],
+            "bs": ["bs", "b.s", "bachelor", "bachelors"],
+            "mba": ["mba", "m.b.a"],
+            "bba": ["bba", "b.b.a"],
+        }
+        
+        search_terms = [norm_level]
+        for key, variants in level_map.items():
+            if norm_level in variants:
+                search_terms = variants
+                break
+        
+        matches = []
+        for person in self.people:
+            education = person.get("listEEdu", [])
+            if not isinstance(education, list):
+                continue
+            
+            for degree in education:
+                if not isinstance(degree, dict):
+                    continue
+                degree_name = _norm_whitespace(str(degree.get("Degree_Name") or "")).lower()
+                
+                # Check if any search term matches
+                for term in search_terms:
+                    if term in degree_name:
+                        matches.append((person, degree))
+                        break
+        
+        return matches
+
+    def _search_by_university_and_degree(self, university_name: str, degree_level: str = None) -> List[Dict[str, Any]]:
+        """Search for faculty with degrees from a university, optionally filtered by degree level.
+        
+        Args:
+            university_name: University/institute name to search for
+            degree_level: Optional degree level filter (PhD, MS, BS, etc.)
+            
+        Returns:
+            List of tuples (person_dict, degree_dict) matching both criteria
+        """
+        # Start with university matches
+        matches = self._search_by_university(university_name)
+        
+        # If no degree level filter, return all
+        if not degree_level:
+            return matches
+        
+        # Filter by degree level
+        norm_level = _norm_whitespace(degree_level).lower()
+        level_map = {
+            "phd": ["phd", "ph.d", "doctorate", "doctor"],
+            "ms": ["ms", "m.s", "master", "masters", "mse", "m.s.e"],
+            "bs": ["bs", "b.s", "bachelor", "bachelors", "bce", "b.c.e"],
+            "mba": ["mba", "m.b.a"],
+            "bba": ["bba", "b.b.a"],
+        }
+        
+        search_terms = [norm_level]
+        for key, variants in level_map.items():
+            if norm_level in variants:
+                search_terms = variants
+                break
+        
+        filtered = []
+        for person, degree in matches:
+            degree_name = _norm_whitespace(str(degree.get("Degree_Name") or "")).lower()
+            for term in search_terms:
+                if term in degree_name:
+                    filtered.append((person, degree))
+                    break
+        
+        return filtered
+
     def stream_answer(self, question: str):
         yield self.answer(question, stream=False)
 
@@ -1026,8 +1147,15 @@ class FacultyReactAgentBuilder:
             "You are a precise university faculty assistant for FAST-NU (Islamabad).\n"
             "Tool selection policy:\n"
             "- When the user asks WHO holds a role/title (e.g., 'Who is the rector', 'vice chancellor', 'director of X', 'HOD of Y'), first use 'search_faculty_by_designation' with the role text to get candidates.\n"
-            "- When the user asks for a specific attribute of a person (email, education, experience, designation, department, website, extension, HEC supervisor), call the corresponding get_faculty_* tool with the person's name, then call finalize_answer with 'question\\n\\n---\\n\\ncontext'.\n"
-            "- If a structured tool returns NOT_FOUND_IN_DOCUMENTS, you may use 'faculty_search' as a fallback.\n"
+            "- When the user asks to LIST or FIND ALL faculty with specific criteria (e.g., 'list all faculty from Bahria University', 'all PhDs', 'faculty with degrees from NUST'), use the appropriate search tool:\n"
+            "  * 'search_faculty_by_university' for queries about degrees from a specific university/institute\n"
+            "  * 'search_faculty_by_degree_level' for queries about degree types (PhD, MS, Bachelor, etc.)\n"
+            "  * 'search_faculty_by_university_and_degree' for combined filters (e.g., 'MS from Bahria', 'PhDs from MIT')\n"
+            "  * 'search_faculty_by_designation' for queries about job titles/roles\n"
+            "- For follow-up questions like 'which of those have MS?' or 'show me only PhDs from that list', use 'search_faculty_by_university_and_degree' with both the university and degree level.\n"
+            "- When the user asks for a specific attribute of a person (email, education, experience, designation, department, website, extension, HEC supervisor), call the corresponding get_faculty_* tool with the person's name first.\n"
+            "- CRITICAL FALLBACK BEHAVIOR: If ANY get_faculty_* tool returns NOT_FOUND_IN_DOCUMENTS or None, immediately call 'get_faculty_full_profile' for that person to retrieve complete information including summary. Extract the requested info from the full profile.\n"
+            "- If get_faculty_full_profile also fails, then use 'faculty_search' with the original question as a last resort.\n"
             "- Always produce the final response via 'finalize_answer' using ONLY tool-derived context.\n"
         )
         self.agent = self._build_agent()
@@ -1238,6 +1366,151 @@ class FacultyReactAgentBuilder:
 
             return "".join(result_lines)
 
+        @tool("search_faculty_by_university")
+        def search_faculty_by_university(university_name: str) -> str:
+            """Find all faculty members who have a degree from the specified university or institute.
+
+            Input: university_name (string). Examples: 'Bahria University', 'NUST', 'Punjab University', 'MIT'.
+            Returns: List of faculty names with their degrees from that university.
+            
+            After using this tool, always call finalize_answer with 'question\n\n---\n\ncontext' to produce the final reply.
+            """
+            matches = fac._search_by_university(university_name)
+            if not matches:
+                return f"No faculty found with degrees from {university_name}"
+            
+            # Group by person to avoid duplicates
+            seen_names = set()
+            unique_matches = []
+            for person, degree in matches:
+                name = _faculty_display_name(person)
+                if name not in seen_names:
+                    seen_names.add(name)
+                    unique_matches.append((person, degree))
+            
+            result_lines = [f"Faculty with degrees from {university_name} ({len(unique_matches)} total):\n\n"]
+            
+            for i, (person, degree) in enumerate(unique_matches, 1):
+                name = _faculty_display_name(person)
+                dept = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
+                email = _norm_whitespace(str(person.get("Email") or ""))
+                degree_name = _norm_whitespace(str(degree.get("Degree_Name") or ""))
+                degree_subject = _norm_whitespace(str(degree.get("Degree_Subject") or ""))
+                degree_institute = _norm_whitespace(str(degree.get("Degree_Institute") or ""))
+                
+                result_lines.append(f"{i}. {name}\n")
+                if degree_name or degree_subject:
+                    deg_str = f"{degree_name} in {degree_subject}" if degree_subject else degree_name
+                    result_lines.append(f"   Degree: {deg_str}\n")
+                if degree_institute:
+                    result_lines.append(f"   Institute: {degree_institute}\n")
+                if dept:
+                    result_lines.append(f"   Department: {dept}\n")
+                if email:
+                    result_lines.append(f"   Email: {email}\n")
+                result_lines.append("\n")
+            
+            return "".join(result_lines)
+
+        @tool("search_faculty_by_degree_level")
+        def search_faculty_by_degree_level(degree_level: str) -> str:
+            """Find all faculty members who have a specific degree level (PhD, MS, Bachelor, etc.).
+
+            Input: degree_level (string). Examples: 'PhD', 'MS', 'Master', 'Bachelor', 'BS'.
+            Returns: List of faculty names with that degree level.
+            
+            After using this tool, always call finalize_answer with 'question\n\n---\n\ncontext' to produce the final reply.
+            """
+            matches = fac._search_by_degree_level(degree_level)
+            if not matches:
+                return f"No faculty found with {degree_level} degrees"
+            
+            # Group by person to avoid duplicates
+            seen_names = set()
+            unique_matches = []
+            for person, degree in matches:
+                name = _faculty_display_name(person)
+                if name not in seen_names:
+                    seen_names.add(name)
+                    unique_matches.append((person, degree))
+            
+            result_lines = [f"Faculty with {degree_level} degrees ({len(unique_matches)} total):\n\n"]
+            
+            for i, (person, degree) in enumerate(unique_matches, 1):
+                name = _faculty_display_name(person)
+                dept = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
+                email = _norm_whitespace(str(person.get("Email") or ""))
+                degree_name = _norm_whitespace(str(degree.get("Degree_Name") or ""))
+                degree_subject = _norm_whitespace(str(degree.get("Degree_Subject") or ""))
+                degree_institute = _norm_whitespace(str(degree.get("Degree_Institute") or ""))
+                
+                result_lines.append(f"{i}. {name}\n")
+                if degree_name or degree_subject:
+                    deg_str = f"{degree_name} in {degree_subject}" if degree_subject else degree_name
+                    result_lines.append(f"   Degree: {deg_str}\n")
+                if degree_institute:
+                    result_lines.append(f"   From: {degree_institute}\n")
+                if dept:
+                    result_lines.append(f"   Department: {dept}\n")
+                if email:
+                    result_lines.append(f"   Email: {email}\n")
+                result_lines.append("\n")
+            
+            return "".join(result_lines)
+
+        @tool("search_faculty_by_university_and_degree")
+        def search_faculty_by_university_and_degree(university_name: str, degree_level: str = None) -> str:
+            """Find faculty with degrees from a specific university, optionally filtered by degree level.
+
+            Input: university_name (string, required), degree_level (string, optional).
+            Examples: 
+            - search_faculty_by_university_and_degree('Bahria University', 'MS')
+            - search_faculty_by_university_and_degree('NUST', 'PhD')
+            Returns: List of faculty matching both university AND degree level criteria.
+            
+            Use this for follow-up questions like "which of those have MS?" or "show me only PhDs from MIT".
+            
+            After using this tool, always call finalize_answer with 'question\n\n---\n\ncontext' to produce the final reply.
+            """
+            matches = fac._search_by_university_and_degree(university_name, degree_level)
+            if not matches:
+                filter_text = f"{degree_level} degrees" if degree_level else "degrees"
+                return f"No faculty found with {filter_text} from {university_name}"
+            
+            # Group by person to avoid duplicates
+            seen_names = set()
+            unique_matches = []
+            for person, degree in matches:
+                name = _faculty_display_name(person)
+                if name not in seen_names:
+                    seen_names.add(name)
+                    unique_matches.append((person, degree))
+            
+            filter_desc = f" with {degree_level} degrees" if degree_level else ""
+            result_lines = [f"Faculty{filter_desc} from {university_name} ({len(unique_matches)} total):\n\n"]
+            
+            for i, (person, degree) in enumerate(unique_matches, 1):
+                name = _faculty_display_name(person)
+                dept = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
+                email = _norm_whitespace(str(person.get("Email") or ""))
+                degree_name = _norm_whitespace(str(degree.get("Degree_Name") or ""))
+                degree_subject = _norm_whitespace(str(degree.get("Degree_Subject") or ""))
+                degree_institute = _norm_whitespace(str(degree.get("Degree_Institute") or ""))
+                
+                result_lines.append(f"{i}. {name}\n")
+                if degree_name or degree_subject:
+                    deg_str = f"{degree_name} in {degree_subject}" if degree_subject else degree_name
+                    result_lines.append(f"   Degree: {deg_str}\n")
+                if degree_institute:
+                    result_lines.append(f"   From: {degree_institute}\n")
+                if dept:
+                    result_lines.append(f"   Department: {dept}\n")
+                if email:
+                    result_lines.append(f"   Email: {email}\n")
+                result_lines.append("\n")
+            
+            return "".join(result_lines)
+
         @tool("get_faculty_full_profile")
         def get_faculty_full_profile(person_name: str) -> str:
             """Return full profile (markdown) including education, experience, publications. Input: person_name (string).
@@ -1302,7 +1575,10 @@ class FacultyReactAgentBuilder:
             faculty_search,
             simple_compose_email,
             finalize_answer,
-            search_faculty_by_designation
+            search_faculty_by_designation,
+            search_faculty_by_university,
+            search_faculty_by_degree_level,
+            search_faculty_by_university_and_degree
         ]
 
         return create_react_agent(

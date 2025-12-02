@@ -224,6 +224,11 @@ def _get_engine():
                 def answer(self, q: str, stream: bool = False) -> str:
                     q = q or ""
                     return f"I'm your general info assistant. Question: {q}"
+                
+                def stream_answer(self, q: str):
+                    """Stream fallback response."""
+                    q = q or ""
+                    yield f"I'm your general info assistant. Question: {q}"
             _ENGINE = _FallbackEngine()
     return _ENGINE
 
