@@ -131,6 +131,8 @@ async def stream_supervisor_response(
 
     final_state = {}
     final_response = ""
+    # Track the last sent accumulated response to compute deltas
+    last_sent_result = ""
 
     try:
         import logging
@@ -176,24 +178,47 @@ async def stream_supervisor_response(
                     if data and "result" in data:
                         final_state.update(data)
                         final_response = data["result"]
-                        response_data = {
-                            "response": data["result"],
-                            "route": data.get("route", []),
-                            "session_id": session_id,
-                        }
-                        yield f"data: {json.dumps(response_data)}\n\n"
+                        
+                        # Calculate and send any remaining delta
+                        current_result = data["result"]
+                        if current_result.startswith(last_sent_result):
+                            delta = current_result[len(last_sent_result):]
+                        else:
+                            # If content changed completely (unlikely in append-only), send full
+                            delta = current_result
+                        
+                        if delta:
+                            last_sent_result = current_result
+                            response_data = {
+                                "response": delta,
+                                "route": data.get("route", []),
+                                "session_id": session_id,
+                            }
+                            yield f"data: {json.dumps(response_data)}\n\n"
+                            
             elif kind == "on_chain_stream":
                 # Stream partial results
                 node_name = event["name"]
                 if node_name in ["student", "faculty", "direct", "exam"]:
                     data = event["data"].get("chunk")
                     if data and "result" in data:
-                        response_data = {
-                            "response": data["result"],
-                            "route": data.get("route", []),
-                            "session_id": session_id,
-                        }
-                        yield f"data: {json.dumps(response_data)}\n\n"
+                        current_result = data["result"]
+                        
+                        # Calculate delta to avoid sending full history every chunk
+                        if current_result.startswith(last_sent_result):
+                            delta = current_result[len(last_sent_result):]
+                        else:
+                            delta = current_result
+                            
+                        if delta:
+                            last_sent_result = current_result
+                            response_data = {
+                                "response": delta,
+                                "route": data.get("route", []),
+                                "session_id": session_id,
+                            }
+                            yield f"data: {json.dumps(response_data)}\n\n"
+                            
             elif kind == "on_chain_start":
                 # Yield intermediate steps
                 node_name = event["name"]
@@ -322,6 +347,8 @@ async def stream_supervisor_response(
                         title = (" ".join(words) or source[:50]).strip()
                         if title:
                             title = title[:1].upper() + title[1:]
+                            session.session_name = title
+                            db.commit()
                     return session.id, title
 
                 session_row_id, auto_title = await asyncio.to_thread(
@@ -513,6 +540,8 @@ async def chat_endpoint(
                             title = (" ".join(words) or source[:50]).strip()
                             if title:
                                 title = title[:1].upper() + title[1:]
+                                session.session_name = title
+                                db.commit()
                         return session.id, title
 
                     _sid, auto_title = await asyncio.to_thread(

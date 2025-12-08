@@ -58,4 +58,5 @@ dependencies = [
     "unstructured>=0.17.0,<1.0.0",
     "uvicorn[standard]>=0.30.0,<1.0.0",
     "email-validator>=2.3.0",
+    "locust>=2.42.6",
 ]

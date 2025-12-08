@@ -16,7 +16,10 @@ SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     connect_args={"check_same_thread": False},  # Needed for SQLite
-    echo=False  # Set to True for SQL debugging
+    echo=False,  # Set to True for SQL debugging
+    pool_size=30,  # Increased for load testing
+    max_overflow=50,
+    pool_timeout=60
 )
 
 # Create SessionLocal class
