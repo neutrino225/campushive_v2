@@ -82,6 +82,7 @@ def _person_to_document(p: Dict[str, Any]) -> Document:
     """Create a single markdown style document for retrieval."""
     name_disp = _faculty_display_name(p)
     dept = _norm_whitespace(str(p.get("Department") or p.get("Dept_ID") or ""))
+    dept_name = _norm_whitespace(str(p.get("Department_Name") or ""))
     email = _norm_whitespace(str(p.get("Email") or ""))
     designation = _norm_whitespace(str(p.get("Designation_Title") or ""))
     summary = _strip_html(p.get("summary") or "")
@@ -108,7 +109,8 @@ def _person_to_document(p: Dict[str, Any]) -> Document:
 
     content = [
         f"# {name_disp}",
-        f"Department: {dept}",
+        f"Department Code: {dept}",
+        f"Department Name: {dept_name or 'N/A'}",
         f"Designation: {designation}",
         f"Email: {email}",
         "",
@@ -123,6 +125,7 @@ def _person_to_document(p: Dict[str, Any]) -> Document:
             "source": f"faculty:{p.get('Emp_ID')}",
             "name": name_disp,
             "dept": dept,
+            "dept_name": dept_name,
             "email": email,
             "designation": designation,
         },
@@ -415,10 +418,16 @@ class FacultyAgent:
         return f"Designation of {_faculty_display_name(person)}: {val}"
 
     def _tool_department(self, person: Dict[str, Any]) -> Optional[str]:
-        val = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
-        if not val:
-            return f"Department of {_faculty_display_name(person)}: N/A"
-        return f"Department of {_faculty_display_name(person)}: {val}"
+        dept_code = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
+        dept_name = _norm_whitespace(str(person.get("Department_Name") or ""))
+        name_disp = _faculty_display_name(person)
+        
+        if dept_name:
+            return f"Department of {name_disp}: {dept_name} ({dept_code})" if dept_code else f"Department of {name_disp}: {dept_name}"
+        elif dept_code:
+            return f"Department of {name_disp}: {dept_code}"
+        else:
+            return f"Department of {name_disp}: N/A"
 
     def _tool_extension(self, person: Dict[str, Any]) -> Optional[str]:
         val = _norm_whitespace(str(person.get("Extension") or ""))
@@ -440,6 +449,7 @@ class FacultyAgent:
         name_disp = _faculty_display_name(person)
         summary = _strip_html(person.get("summary") or "")
         dept = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
+        dept_name = _norm_whitespace(str(person.get("Department_Name") or ""))
         email = _norm_whitespace(str(person.get("Email") or ""))
         designation = _norm_whitespace(str(person.get("Designation_Title") or ""))
         extension = _norm_whitespace(str(person.get("Extension") or ""))
@@ -451,7 +461,8 @@ class FacultyAgent:
 
         lines = [
             f"# {name_disp}",
-            f"Department: {dept or 'N/A'}",
+            f"Department Code: {dept or 'N/A'}",
+            f"Department Name: {dept_name or 'N/A'}",
             f"Designation: {designation or 'N/A'}",
             f"Email: {email or 'N/A'}",
             f"Extension: {extension or 'N/A'}",
@@ -533,6 +544,7 @@ class FacultyAgent:
             name_disp = _faculty_display_name(person)
             designation = _norm_whitespace(str(person.get("Designation_Title") or "")) or None
             dept = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or "")) or None
+            dept_name = _norm_whitespace(str(person.get("Department_Name") or "")) or None
             email = email or _norm_whitespace(str(person.get("Email") or "")) or None
 
         if not email:
@@ -1113,6 +1125,33 @@ class FacultyAgent:
         
         return filtered
 
+    def _search_by_department(self, department_name: str) -> List[Dict[str, Any]]:
+        """Search for faculty members by department name or code.
+        
+        Args:
+            department_name: Department name or code to search for (e.g., "Computer Science Department", "CS")
+            
+        Returns:
+            List of person dictionaries matching the department
+        """
+        if not department_name:
+            return []
+        
+        norm_dept = _norm_whitespace(department_name).lower()
+        matches = []
+        
+        for person in self.people:
+            # Check both Department (code) and Department_Name fields
+            dept_code = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or "")).lower()
+            dept_name = _norm_whitespace(str(person.get("Department_Name") or "")).lower()
+            
+            # Match if search term is in either field
+            if (norm_dept in dept_code or dept_code in norm_dept or 
+                norm_dept in dept_name or dept_name in norm_dept):
+                matches.append(person)
+        
+        return matches
+
     def stream_answer(self, question: str):
         yield self.answer(question, stream=False)
 
@@ -1511,6 +1550,42 @@ class FacultyReactAgentBuilder:
             
             return "".join(result_lines)
 
+        @tool("search_faculty_by_department")
+        def search_faculty_by_department(department_name: str) -> str:
+            """Find all faculty members in a specific department.
+
+            Input: department_name (string). Examples: 'Computer Science', 'CS', 'Electrical Engineering', 'AI & Data Science', 'Cyber Security Department'.
+            Matches against both department codes (CS, EE, MS, SH) and full department names.
+            Returns: List of faculty names in that department with their designations.
+            
+            After using this tool, always call finalize_answer with 'question\n\n---\n\ncontext' to produce the final reply.
+            """
+            matches = fac._search_by_department(department_name)
+            if not matches:
+                return f"No faculty found in {department_name}"
+            
+            result_lines = [f"Faculty in {department_name} ({len(matches)} total):\n\n"]
+            
+            for i, person in enumerate(matches, 1):
+                name = _faculty_display_name(person)
+                designation = _norm_whitespace(str(person.get("Designation_Title") or ""))
+                dept_code = _norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
+                dept_name = _norm_whitespace(str(person.get("Department_Name") or ""))
+                email = _norm_whitespace(str(person.get("Email") or ""))
+                
+                result_lines.append(f"{i}. {name}\n")
+                if designation:
+                    result_lines.append(f"   Designation: {designation}\n")
+                if dept_name:
+                    result_lines.append(f"   Department: {dept_name} ({dept_code})\n")
+                elif dept_code:
+                    result_lines.append(f"   Department Code: {dept_code}\n")
+                if email:
+                    result_lines.append(f"   Email: {email}\n")
+                result_lines.append("\n")
+            
+            return "".join(result_lines)
+
         @tool("get_faculty_full_profile")
         def get_faculty_full_profile(person_name: str) -> str:
             """Return full profile (markdown) including education, experience, publications. Input: person_name (string).
@@ -1576,6 +1651,7 @@ class FacultyReactAgentBuilder:
             simple_compose_email,
             finalize_answer,
             search_faculty_by_designation,
+            search_faculty_by_department,
             search_faculty_by_university,
             search_faculty_by_degree_level,
             search_faculty_by_university_and_degree

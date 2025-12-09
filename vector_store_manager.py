@@ -342,6 +342,7 @@ class FacultyDataProcessor(DataProcessor):
         
         summary = strip_html(person.get("summary") or "")
         dept = norm_whitespace(str(person.get("Department") or person.get("Dept_ID") or ""))
+        dept_name = norm_whitespace(str(person.get("Department_Name") or ""))
         email = norm_whitespace(str(person.get("Email") or ""))
         designation = norm_whitespace(str(person.get("Designation_Title") or ""))
         extension = norm_whitespace(str(person.get("Extension") or ""))
@@ -355,7 +356,8 @@ class FacultyDataProcessor(DataProcessor):
         # Build document content
         content_lines = [
             f"# {display_name}",
-            f"Department: {dept}",
+            f"Department Code: {dept}",
+            f"Department Name: {dept_name or 'N/A'}",
             f"Designation: {designation}",
             f"Email: {email}",
             f"Extension: {extension}",
@@ -379,6 +381,7 @@ class FacultyDataProcessor(DataProcessor):
             "source": f"faculty:{person.get('Emp_ID')}",
             "name": display_name,
             "dept": dept,
+            "dept_name": dept_name,
             "email": email,
             "designation": designation,
             "emp_id": person.get("Emp_ID"),
