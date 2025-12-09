@@ -47,14 +47,20 @@ def structured_exam_to_documents(structured: StructuredExam, source_filename: st
             f"Question: {q.question_text}\n"
             f"Marks: {q.marks if q.marks is not None else 'N/A'}"
         )
+        # ChromaDB only accepts str, int, float, or bool - no None values
         metadata = {
             "source": f"exam:{structured.course}:{os.path.basename(source_filename)}",
             "course": structured.course,
             "exam_type": structured.exam_type,
-            "topic": q.topic,
-            "difficulty": q.difficulty,
-            "marks": q.marks,
         }
+        # Only add non-None values to metadata
+        if q.topic is not None:
+            metadata["topic"] = str(q.topic)
+        if q.difficulty is not None:
+            metadata["difficulty"] = str(q.difficulty)
+        if q.marks is not None:
+            metadata["marks"] = q.marks if isinstance(q.marks, (int, float)) else str(q.marks)
+        
         docs.append(Document(page_content=content, metadata=metadata))
     return docs
 
@@ -69,6 +75,6 @@ def append_structured_exam_to_json(structured: StructuredExam, json_path: str) -
                 existing = []
     except Exception:
         existing = []
-    existing.append(structured.dict())
+    existing.append(structured.model_dump())
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2)

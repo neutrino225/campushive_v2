@@ -73,6 +73,7 @@ class UploadedExam(Base):
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
     status = Column(String(50), nullable=False, default="processing")  # processing | processed | failed
     file_path = Column(String(1024), nullable=False)
+    error_message = Column(Text, nullable=True)  # Store error details if processing fails
 
     # Relationships
     uploader = relationship("User", back_populates="uploaded_exams")

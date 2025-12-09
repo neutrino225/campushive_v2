@@ -116,6 +116,7 @@ class UploadedExamResponse(BaseModel):
     uploaded_at: datetime
     status: str
     file_path: str
+    error_message: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -224,12 +225,16 @@ async def upload_exam(
                     if rec:
                         rec.status = "processed"
                         session.commit()
-            except Exception:
-                # Mark failed
+            except Exception as e:
+                # Mark failed with error message
+                import traceback
+                error_msg = f"{str(e)}\n{traceback.format_exc()}"
+                logger.error(f"Exam processing failed for upload {upload_id}: {error_msg}")
                 with next(get_db()) as session:
                     rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
                     if rec:
                         rec.status = "failed"
+                        rec.error_message = error_msg[:2000]  # Limit error message length
                         session.commit()
 
         await asyncio.get_event_loop().run_in_executor(
@@ -262,6 +267,90 @@ async def list_uploaded_exams(
     rows = db.query(UploadedExam).order_by(UploadedExam.uploaded_at.desc()).all()
     return [UploadedExamResponse.model_validate(r) for r in rows]
 
+
+@router.post("/exams/retry/{exam_id}", response_model=OperationResponse)
+async def retry_failed_exam(
+    exam_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+    manager: VectorStoreManager = Depends(get_vector_manager),
+):
+    """Retry processing a failed exam upload."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    
+    # Get the exam record
+    exam = db.query(UploadedExam).filter(UploadedExam.id == exam_id).first()
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    
+    if exam.status != "failed":
+        raise HTTPException(status_code=400, detail=f"Exam status is '{exam.status}', can only retry failed uploads")
+    
+    # Check if file still exists
+    if not os.path.exists(exam.file_path):
+        raise HTTPException(status_code=404, detail="Exam file not found on disk")
+    
+    # Reset status to processing
+    exam.status = "processing"
+    exam.error_message = None
+    db.commit()
+    
+    # Reprocess in background
+    executor = ThreadPoolExecutor(max_workers=1)
+    
+    def process_upload(upload_id: int, path: str, course: str):
+        try:
+            from app.utils.exams import (
+                analyze_pdf_to_structured,
+                structured_exam_to_documents,
+                append_structured_exam_to_json,
+            )
+            
+            structured = analyze_pdf_to_structured(path, course)
+            if structured is None:
+                raise RuntimeError("Exam analysis failed")
+            
+            # Append to structured exams JSON
+            struct_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "structured_exams.json"))
+            append_structured_exam_to_json(structured, struct_path)
+            
+            # Convert to Documents
+            docs = structured_exam_to_documents(structured, path)
+            
+            # Add to vector store
+            manager.add_documents_to_store(VectorStoreType.EXAMS, docs)
+            
+            # Mark processed
+            with next(get_db()) as session:
+                rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
+                if rec:
+                    rec.status = "processed"
+                    session.commit()
+        except Exception as e:
+            import traceback
+            error_msg = f"{str(e)}\n{traceback.format_exc()}"
+            logger.error(f"Exam reprocessing failed for upload {upload_id}: {error_msg}")
+            with next(get_db()) as session:
+                rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
+                if rec:
+                    rec.status = "failed"
+                    rec.error_message = error_msg[:2000]
+                    session.commit()
+    
+    await asyncio.get_event_loop().run_in_executor(
+        executor,
+        process_upload,
+        exam.id,
+        exam.file_path,
+        exam.course_name,
+    )
+    
+    return OperationResponse(
+        success=True,
+        message=f"Exam ID {exam_id} reprocessing started",
+        data={"exam_id": exam_id}
+    )
 
 # Health check endpoints
 @router.get("/health", response_model=Dict[str, str])
