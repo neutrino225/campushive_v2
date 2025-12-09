@@ -59,4 +59,6 @@ dependencies = [
     "uvicorn[standard]>=0.30.0,<1.0.0",
     "email-validator>=2.3.0",
     "locust>=2.42.6",
+    "pypdf2>=3.0.1",
+    "python-docx>=1.2.0",
 ]

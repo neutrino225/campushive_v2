@@ -237,6 +237,103 @@ class OBEReactTooling:
         out = llm.invoke(prompt)
         return (out.content or "").strip()
 
+    def get_program_plos(self, program_name: str = "BS Computer Science") -> Dict[str, Any]:
+        """Fetch Program Learning Outcomes (PLOs) from the degree catalog.
+        
+        Args:
+            program_name: Name of the degree program (e.g., "BS Computer Science", "BS Software Engineering")
+        
+        Returns:
+            Dictionary with plos list and program info
+        """
+        import json
+        logger = logging.getLogger(__name__)
+        
+        # Load degree programs catalog
+        degree_file = Path(__file__).parent.parent.parent.parent / "data" / "degree_programs" / "degree_programs.json"
+        
+        if not degree_file.exists():
+            return {"error": "Degree programs catalog not found.", "plos": []}
+        
+        try:
+            with open(degree_file, 'r', encoding='utf-8') as f:
+                programs = json.load(f)
+            
+            # Normalize program name for matching
+            program_name_lower = program_name.lower().strip()
+            
+            # Search for matching program with priority scoring
+            matching_program = None
+            best_score = 0
+            
+            for program in programs:
+                title = program.get("title", "").lower()
+                score = 0
+                
+                # Exact match gets highest score
+                if program_name_lower == title:
+                    score = 1000
+                # Check if search term is a substring
+                elif program_name_lower in title:
+                    score = 500 + len(program_name_lower)
+                # Check if title contains search term
+                elif title in program_name_lower:
+                    score = 400 + len(title)
+                else:
+                    # Count matching keywords
+                    search_keywords = set(program_name_lower.split())
+                    title_keywords = set(title.split())
+                    common = search_keywords & title_keywords
+                    # Only consider if at least 2 keywords match or "computer science" matches
+                    if len(common) >= 2 or ("computer" in common and "science" in common):
+                        score = len(common) * 100
+                
+                if score > best_score:
+                    best_score = score
+                    matching_program = program
+            
+            if not matching_program:
+                logger.warning(f"[OBEReact] Program '{program_name}' not found in catalog")
+                return {
+                    "error": f"Program '{program_name}' not found. Try: 'BS Computer Science', 'BS Software Engineering', 'BS AI & Data Science', etc.",
+                    "plos": []
+                }
+            
+            # Extract PLOs
+            plos = matching_program.get("plos", [])
+            
+            if not plos:
+                return {
+                    "error": f"No PLOs found for {matching_program.get('title')}",
+                    "plos": [],
+                    "program_info": matching_program.get("title")
+                }
+            
+            # PLOs may be stored as a single concatenated string, parse them
+            if len(plos) == 1 and isinstance(plos[0], str):
+                import re
+                # Split by numbered patterns like "1 Title", "2 Title", etc.
+                plo_text = plos[0]
+                # Match patterns like "1 Title description" followed by "2 Title" or end of string
+                matches = re.findall(r'(\d+)\s+([A-Z][^\d]*?)(?=\d+\s+[A-Z]|$)', plo_text, re.DOTALL)
+                if matches:
+                    plos = [f"PLO-{num}: {desc.strip()}" for num, desc in matches]
+                else:
+                    # Fallback: try splitting by newlines or periods
+                    plos = [p.strip() for p in plo_text.split('\n') if p.strip()]
+            
+            logger.info(f"[OBEReact] Found {len(plos)} PLOs for {matching_program.get('title')}")
+            
+            return {
+                "plos": plos,
+                "program_info": matching_program.get("title"),
+                "total_plos": len(plos)
+            }
+            
+        except Exception as e:
+            logger.error(f"[OBEReact] Error loading degree catalog: {e}")
+            return {"error": f"Error loading degree catalog: {str(e)}", "plos": []}
+
 
 class OBEReactAgentBuilder:
     """Builds a ReAct agent for OBE mapping with in-pointer memory."""
@@ -301,6 +398,15 @@ class OBEReactAgentBuilder:
             """Answer general questions from the uploaded session documents using simple RAG. If user_id/session_id are omitted, the current chat context will be used."""
             return t.answer_from_session_docs(question, user_id, session_id)
 
+        @tool("get_program_plos")
+        def _get_program_plos(program_name: str = "BS Computer Science") -> Dict[str, Any]:
+            """Fetch Program Learning Outcomes (PLOs) from the FAST-NU degree catalog.
+            Use this when user asks for PLOs of a specific degree program.
+            Available programs: 'BS Computer Science', 'BS Software Engineering', 'BS AI & Data Science', 'BS Cyber Security', etc.
+            Inputs: program_name: str (e.g., "BS Computer Science")
+            Returns: Dictionary with 'plos' (list of PLO strings), 'program_info' (program title), and 'total_plos' (count)."""
+            return t.get_program_plos(program_name)
+
         agent = create_react_agent(
             model=llm,
             tools=[
@@ -309,6 +415,7 @@ class OBEReactAgentBuilder:
                 _explain_mapping_scores,
                 _extract_outcomes_from_session_docs,
                 _answer_from_session_docs,
+                _get_program_plos,
             ],
             checkpointer=memory,
         )
