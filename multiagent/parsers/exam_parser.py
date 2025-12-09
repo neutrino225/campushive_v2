@@ -16,13 +16,13 @@ from typing import List, Optional, Union
 
 class Question(BaseModel):
     question_text: str = Field(description="The full text of the question")
-    marks: Optional[Union[int, str]] = Field(description="Marks allocated to the question (integer preferred; may be string like '5' or '5 marks')")
-    difficulty: Optional[str] = Field(description="Estimated difficulty (e.g., Easy, Medium, Hard)")
-    topic: Optional[str] = Field(description="The primary topic of the question")
+    marks: Optional[Union[int, str]] = Field(default=None, description="Marks allocated to the question (integer preferred; may be string like '5' or '5 marks')")
+    difficulty: Optional[str] = Field(default=None, description="Estimated difficulty (e.g., Easy, Medium, Hard)")
+    topic: Optional[str] = Field(default=None, description="The primary topic of the question")
 
 class StructuredExam(BaseModel):
     course: str = Field(description="The course name for the exam")
-    exam_type: str = Field(description="The type of exam (e.g., Sessional, Final, Midterm)")
+    exam_type: Optional[str] = Field(default="Unknown", description="The type of exam (e.g., Sessional, Final, Midterm, Quiz). Use 'Unknown' if not clearly stated.")
     questions: List[Question] = Field(description="A list of questions in the exam")
 
 class ExamAnalyzer:
@@ -34,7 +34,10 @@ class ExamAnalyzer:
                     "system",
                     "You are an expert at analyzing exam papers. Your task is to extract structured information from the raw text of an exam. "
                     "Identify the course, exam type, and all the questions. For each question, extract the question text, marks, estimated difficulty, and topic. "
-                    "Return the information in the specified JSON format.",
+                    "If exam_type is not clearly stated in the document, use 'Unknown'. "
+                    "For marks, prefer integers but accept strings if the format is unclear. Convert float marks (like 2.5) to integers by rounding. "
+                    "Return the information in the specified JSON format. "
+                    "Focus on extracting actual exam questions, not instructions or header information.",
                 ),
                 ("human", "Exam Text:\n{exam_text}\n\nCourse: {course_name}"),
             ]
@@ -46,15 +49,19 @@ class ExamAnalyzer:
         try:
             result = self.structured_llm.invoke({"exam_text": raw_text, "course_name": course_name})
             # Normalize marks: coerce strings like "5" or "5 marks" to int when possible
+            # Also handle floats by rounding to nearest int
             for q in result.questions:
-                if isinstance(q.marks, str):
-                    import re
-                    m = re.search(r"\d+", q.marks)
-                    if m:
-                        try:
-                            q.marks = int(m.group(0))
-                        except Exception:
-                            pass
+                if q.marks is not None:
+                    if isinstance(q.marks, float):
+                        q.marks = int(round(q.marks))
+                    elif isinstance(q.marks, str):
+                        import re
+                        m = re.search(r"\d+\.?\d*", q.marks)
+                        if m:
+                            try:
+                                q.marks = int(round(float(m.group(0))))
+                            except Exception:
+                                pass
             return result
         except Exception as e:
             print(f"Error analyzing exam for course {course_name}: {e}")
@@ -107,4 +114,4 @@ if __name__ == '__main__':
     # You can now save this structured_data to a JSON file or process it further
     import json
     with open('data/structured_exams.json', 'w') as f:
-        json.dump([exam.dict() for exam in structured_data], f, indent=2)
+        json.dump([exam.model_dump() for exam in structured_data], f, indent=2)

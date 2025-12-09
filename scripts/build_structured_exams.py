@@ -27,19 +27,23 @@ def build_structured_exams(limit_per_course: int | None = None) -> int:
         course_name = course_dir.name
         seen = 0
         for pdf in sorted(course_dir.glob("*.pdf")):
-            raw_text = parser.extract_text_from_pdf(pdf)
-            if not raw_text:
+            try:
+                raw_text = parser.extract_text_from_pdf(pdf)
+                if not raw_text:
+                    continue
+                exam = analyzer.analyze_exam(raw_text, course_name)
+                if exam:
+                    # attach filename for traceability
+                    d = exam.model_dump()
+                    d["filename"] = pdf.name
+                    structured.append(d)
+                    count += 1
+                    seen += 1
+                    if limit_per_course and seen >= limit_per_course:
+                        break
+            except Exception as e:
+                print(f"Skipping {pdf.name}: {e}")
                 continue
-            exam = analyzer.analyze_exam(raw_text, course_name)
-            if exam:
-                # attach filename for traceability
-                d = exam.dict()
-                d["filename"] = pdf.name
-                structured.append(d)
-                count += 1
-                seen += 1
-                if limit_per_course and seen >= limit_per_course:
-                    break
 
     STRUCTURED_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(STRUCTURED_PATH, "w", encoding="utf-8") as f:

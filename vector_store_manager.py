@@ -216,7 +216,8 @@ class ExamDataProcessor(DataProcessor):
         # Iterate with progress over exams and questions
         for exam in _tqdm(data, desc="Processing exams", unit="exam"):
             course = exam.get("course", "Unknown")
-            exam_type = exam.get("exam_type", "Unknown")
+            exam_type = exam.get("exam_type") or "Unknown"  # Handle None values
+            filename = exam.get("filename", "")
             questions = exam.get("questions", []) or []
             for question in _tqdm(questions, desc=f"Questions ({course})", unit="q", leave=False):
                 content = f"Course: {course}\nExam Type: {exam_type}\n"
@@ -225,13 +226,27 @@ class ExamDataProcessor(DataProcessor):
                 content += f"Marks: {question.get('marks', 'N/A')}"
 
                 metadata = {
-                    "source": f"exam:{course}:{exam.get('filename', '')}",
+                    "source": f"exam:{course}:{filename}",
                     "course": course,
                     "exam_type": exam_type,
-                    "topic": question.get("topic"),
-                    "difficulty": question.get("difficulty"),
-                    "marks": question.get("marks"),
                 }
+                # Only add non-None values to metadata (ChromaDB requirement)
+                topic = question.get("topic")
+                if topic is not None:
+                    metadata["topic"] = str(topic)
+                
+                difficulty = question.get("difficulty")
+                if difficulty is not None:
+                    metadata["difficulty"] = str(difficulty)
+                
+                marks = question.get("marks")
+                if marks is not None:
+                    # Ensure marks is serializable (int, float, or str)
+                    if isinstance(marks, (int, float)):
+                        metadata["marks"] = marks
+                    else:
+                        metadata["marks"] = str(marks)
+                
                 documents.append(Document(page_content=content, metadata=metadata))
 
         return documents
