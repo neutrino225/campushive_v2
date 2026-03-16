@@ -1,0 +1,240 @@
+/* overall layout */
+.cbp__container {
+    display: flex;
+    height: calc(100vh - 64px); /* adjust if you have a navbar/footer */
+    background: #0a0a0a;
+    color: #eee;
+  }
+  
+  /* sidebar */
+  .cbp__sidebar {
+    width: 240px;
+    background: #111111;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+  }
+  .cbp__section {
+    margin-bottom: 16px;
+  }
+  .cbp__section-title {
+    margin-bottom: 6px;
+    font-size: 0.8rem;
+    color: #aaa;
+  }
+  .cbp__item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .cbp__item:hover,
+  .cbp__item.active {
+    background: #0f0f0f;
+  }
+  .cbp__new-chat {
+    margin-top: auto;
+    background: #60a5fa;
+    color: #0b1220;
+    border: none;
+    padding: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.875rem;
+  }
+  
+  /* main area */
+  .cbp__main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #0d0d0d;
+  }
+  
+  /* header row */
+  .cbp__header {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px;
+  }
+  .cbp__header-icon {
+    color: #777;
+    font-size: 1rem;
+  }
+  .cbp__header-spacer {
+    flex: 1;
+  }
+  .cbp__toggle {
+    display: flex;
+    align-items: center;
+    font-size: 0.8rem;
+    color: #aaa;
+  }
+  .cbp__toggle span {
+    margin-right: 6px;
+  }
+  /* simple toggle switch */
+  .cbp__switch {
+    position: relative;
+    display: inline-block;
+    width: 32px;
+    height: 16px;
+  }
+  .cbp__switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .cbp__slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #333;
+    transition: 0.2s;
+    border-radius: 16px;
+  }
+  .cbp__slider:before {
+    position: absolute;
+    content: "";
+    height: 12px; width: 12px;
+    left: 2px; bottom: 2px;
+    background: #eee;
+    transition: 0.2s;
+    border-radius: 50%;
+  }
+  .cbp__switch input:checked + .cbp__slider {
+    background: #60a5fa;
+  }
+  .cbp__switch input:checked + .cbp__slider:before {
+    transform: translateX(16px);
+  }
+  
+  /* greeting screen */
+  .cbp__greeting {
+    padding: 16px;
+    text-align: center;
+    flex: 1;
+    overflow-y: auto;
+    background: #0b0b0b;
+  }
+  .cbp__greeting h2 {
+    margin-bottom: 6px;
+    color: #fff;
+    font-size: 1.5rem;
+  }
+  .cbp__subtitle {
+    margin-bottom: 16px;
+    color: #aaa;
+    font-size: 0.875rem;
+  }
+  .cbp__quick-actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .cbp__quick-actions button {
+    background: #121212;
+    border: none;
+    padding: 12px;
+    border-radius: 8px;
+    width: 120px;
+    cursor: pointer;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.2s;
+  }
+  .cbp__quick-actions button .icon {
+    font-size: 1.25rem;
+    color: #60a5fa;
+  }
+  .cbp__quick-actions button:hover {
+    background: #0f0f0f;
+  }
+  .cbp__tabs {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+  }
+  .cbp__tabs button {
+    background: transparent;
+    border: none;
+    padding: 8px 12px;
+    color: #aaa;
+    cursor: pointer;
+    transition: color 0.2s, background 0.2s;
+    border-radius: 4px;
+  }
+  .cbp__tabs button.active,
+  .cbp__tabs button:hover {
+    color: #fff;
+    background: #121212;
+  }
+  
+  /* chat window */
+  .cbp__chat-window {
+    flex: 1;
+    padding: 12px;
+    overflow-y: auto;
+    background: #0a0a0a;
+  }
+  .cbp__message {
+    max-width: 70%;
+    margin: 6px 0;
+    padding: 8px 12px;
+    border-radius: 8px;
+    line-height: 1.4;
+    font-size: 0.875rem;
+  }
+  .cbp__message.user {
+    margin-left: auto;
+    background: #60a5fa;
+    color: #0b1220;
+  }
+  .cbp__message.bot {
+    margin-right: auto;
+    background: #121212;
+    color: #fff;
+  }
+  
+  /* input bar */
+  .cbp__input-bar {
+    display: flex;
+    padding: 8px 12px;
+    background: #0f0f0f;
+    align-items: center;
+  }
+  .cbp__input-bar input {
+    flex: 1;
+    padding: 8px;
+    background: #121212;
+    border: none;
+    border-radius: 6px;
+    color: #ccc;
+    outline: none;
+    margin-right: 8px;
+    font-size: 0.875rem;
+  }
+  .cbp__input-bar button {
+    background: #60a5fa;
+    border: none;
+    padding: 0 12px;
+    height: 32px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cbp__input-bar button svg {
+    color: #121212;
+    font-size: 0.75rem;
+  }
+  

@@ -107,9 +107,18 @@ def create_main_supervisor_node():
         else:
             # Hard keyword heuristics for robust domain selection
             ql = q.lower()
+            # Leadership/admin facts are generally stored in general university docs
+            # (student domain), not faculty directory profiles.
+            if any(k in ql for k in [
+                "rector", "vice chancellor", "vice-chancellor", "registrar",
+                "controller of examinations", "controller examinations"
+            ]):
+                decision = "student"
             if any(k in ql for k in [
                 "exam", "quiz", "test", "paper", "assessment"
-            ]) and "generate" in ql:  # Only route to exam if generating
+            ]) and any(v in ql for v in [
+                "generate", "create", "make", "build", "design", "draft", "prepare"
+            ]):  # Route to exam when user asks to create/generate assessments
                 decision = "exam"
             elif any(k in ql for k in [
                 "professor", "prof ", "prof.", "dr.", "faculty member", "lecturer", "instructor",

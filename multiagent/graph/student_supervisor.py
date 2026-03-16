@@ -74,44 +74,60 @@ def create_student_supervisor_node():
         
         q = state.get("question", "")
         session_id = state.get("session_id", "default")
+        ql = q.lower()
+        timetable_keywords = [
+            "timetable",
+            "class schedule",
+            "section timing",
+            "my schedule",
+            "course schedule",
+            "weekly schedule",
+            "weekly timetable",
+        ]
+        day_keywords = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "today"]
+
+        # Timetable queries need deterministic routing because the timetable
+        # dataset is independent from the general/faculty vector stores.
+        if any(k in ql for k in timetable_keywords) or (
+            any(day in ql for day in day_keywords)
+            and any(term in ql for term in ["schedule", "class", "classes", "course", "lecture", "timetable"])
+        ):
+            decision = "timetable"
+        else:
+            decision = None
         
         # Include conversation context for intelligent routing
         context = memory_manager.get_last_context(session_id, last_n=5)
         question_with_context = f"{context}\n{q}" if context else q
         
-        msgs = [SystemMessage(content=system_prompt), HumanMessage(content=f"Question: {question_with_context}")]
-        try:
-            resp = await llm.ainvoke(msgs)
-            decision = (resp.content or "").strip().lower()
-        except Exception:
-            # Improved fallback heuristics
-            ql = q.lower()
-            
-            # Timetable keywords
-            if any(k in ql for k in ["timetable", "class schedule", "section timing", "my schedule"]):
-                decision = "timetable"
-            
-            # Degree advisor keywords (program-specific queries)
-            elif any(k in ql for k in [
-                "bs cs", "bs ai", "bs se", "bs ee", "bs ce",  # Specific programs
-                "bachelor of science", "degree program",
-                "compare programs", "semester course", "course list",
-                "recommend degree", "choose program", "which program"
-            ]):
-                decision = "degree_advisor"
-            
-            # General info keywords (admission, eligibility, university info)
-            elif any(k in ql for k in [
-                "admission", "eligibility", "apply", "requirement",
-                "how to apply", "admission process", "admission test",
-                "campus", "facilities", "scholarship", "fee",
-                "contact", "location"
-            ]):
-                decision = "general_info"
-            
-            # Default to general_info for ambiguous queries
-            else:
-                decision = "general_info"
+        if decision is None:
+            msgs = [SystemMessage(content=system_prompt), HumanMessage(content=f"Question: {question_with_context}")]
+            try:
+                resp = await llm.ainvoke(msgs)
+                decision = (resp.content or "").strip().lower()
+            except Exception:
+                # Improved fallback heuristics
+                # Degree advisor keywords (program-specific queries)
+                if any(k in ql for k in [
+                    "bs cs", "bs ai", "bs se", "bs ee", "bs ce",  # Specific programs
+                    "bachelor of science", "degree program",
+                    "compare programs", "semester course", "course list",
+                    "recommend degree", "choose program", "which program"
+                ]):
+                    decision = "degree_advisor"
+                
+                # General info keywords (admission, eligibility, university info)
+                elif any(k in ql for k in [
+                    "admission", "eligibility", "apply", "requirement",
+                    "how to apply", "admission process", "admission test",
+                    "campus", "facilities", "scholarship", "fee",
+                    "contact", "location"
+                ]):
+                    decision = "general_info"
+                
+                # Default to general_info for ambiguous queries
+                else:
+                    decision = "general_info"
 
         if decision not in {"general_info", "timetable", "degree_advisor"}:
             decision = "general_info"

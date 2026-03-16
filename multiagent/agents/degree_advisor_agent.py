@@ -800,7 +800,7 @@ class DegreeReactAgentBuilder:
             model=llm,
             tools=tools,
             # No checkpointer - stateless agent receives context via messages
-            name="Degree Advisor",
+            name="degree_advisor",
         )
 
     def get_agent(self):
@@ -894,4 +894,3 @@ if __name__ == "__main__":
         for resp in builder.stream(q):
             print(resp, end="", flush=True)
         print("\n" + "="*50 + "\n")
-

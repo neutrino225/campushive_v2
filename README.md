@@ -92,6 +92,8 @@ Testing
 pytest -q
 ```
 
+- Test suite map (agents vs API, markers, reports): see `README/README_tests_diagram.md`.
+
 ## Exam/Quiz Generator (Debug Script)
 
 A dedicated CLI is available to generate exams or quizzes with pretty streaming output and optional diagnostics:

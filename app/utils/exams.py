@@ -39,10 +39,22 @@ def analyze_pdf_to_structured(pdf_path: str, course_name: str) -> Optional[Struc
 def structured_exam_to_documents(structured: StructuredExam, source_filename: str) -> List[Document]:
     """Convert a StructuredExam to a list of LangChain Documents."""
     docs: List[Document] = []
+    extra_metadata = {}
+    if hasattr(structured, "semester"):
+        extra_metadata["semester"] = getattr(structured, "semester")
+    if hasattr(structured, "department"):
+        extra_metadata["department"] = getattr(structured, "department")
+    if hasattr(structured, "source_repo"):
+        extra_metadata["source_repo"] = getattr(structured, "source_repo")
+    if hasattr(structured, "source_path"):
+        extra_metadata["source_path"] = getattr(structured, "source_path")
+
     for q in structured.questions:
         content = (
             f"Course: {structured.course}\n"
             f"Exam Type: {structured.exam_type}\n"
+            f"Semester: {extra_metadata.get('semester', 'N/A')}\n"
+            f"Department: {extra_metadata.get('department', 'N/A')}\n"
             f"Topic: {q.topic or 'N/A'}\n"
             f"Question: {q.question_text}\n"
             f"Marks: {q.marks if q.marks is not None else 'N/A'}"
@@ -55,6 +67,7 @@ def structured_exam_to_documents(structured: StructuredExam, source_filename: st
             "difficulty": q.difficulty,
             "marks": q.marks,
         }
+        metadata.update(extra_metadata)
         docs.append(Document(page_content=content, metadata=metadata))
     return docs
 

@@ -255,7 +255,7 @@ class ExamReactAgent:
             model=llm,
             tools=tools,
             # No checkpointer - stateless agent receives context via messages
-            name="Exam Agent",
+            name="exam_agent",
         )
     
     def _get_system_message(self, user_role: str = "student") -> str:

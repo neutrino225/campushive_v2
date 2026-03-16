@@ -39,19 +39,44 @@ class ChatRequest(BaseModel):
             return str(self.session_id)
         return self.session_id
 
-async def load_history_into_memory(session_id: str, user_id: int, db: Session) -> None:
+def _build_internal_session_key(session_id: int | str) -> str:
+    return f"chat_session:{session_id}"
+
+
+def _resolve_chat_session(
+    db: Session,
+    user_id: int,
+    db_session_id: int | None = None,
+    external_session_id: str | None = None,
+):
+    query = db.query(ChatSession).filter(ChatSession.user_id == user_id)
+    if db_session_id is not None:
+        return query.filter(ChatSession.id == db_session_id).first()
+    if external_session_id is not None:
+        return query.filter(ChatSession.session_name == external_session_id).first()
+    return None
+
+
+async def load_history_into_memory(
+    memory_session_id: str,
+    user_id: int,
+    db: Session,
+    db_session_id: int | None = None,
+    external_session_id: str | None = None,
+) -> None:
     """
     Load conversation history from database into memory manager.
     This ensures the LLM has context from previous messages.
     """
     from multiagent.memory import memory_manager
     
-    def _load_sync(db, user_id, external_session_id):
-        # Find the session
-        session = db.query(ChatSession).filter(
-            ChatSession.session_name == external_session_id,
-            ChatSession.user_id == user_id
-        ).first()
+    def _load_sync(db, user_id, db_session_id, external_session_id):
+        session = _resolve_chat_session(
+            db,
+            user_id,
+            db_session_id=db_session_id,
+            external_session_id=external_session_id,
+        )
         
         if not session:
             return []
@@ -82,18 +107,24 @@ async def load_history_into_memory(session_id: str, user_id: int, db: Session) -
         return history
     
     # Load history from DB
-    history = await asyncio.to_thread(_load_sync, db, user_id, session_id)
+    history = await asyncio.to_thread(
+        _load_sync,
+        db,
+        user_id,
+        db_session_id,
+        external_session_id,
+    )
     
     # Check if memory already has this history loaded
-    current_memory = memory_manager.get_history(session_id)
+    current_memory = memory_manager.get_history(memory_session_id)
     if len(current_memory) == len(history):
         # Already loaded, skip
         return
     
     # Clear and reload
-    memory_manager.clear_session(session_id)
+    memory_manager.clear_session(memory_session_id)
     for user_msg, agent_msg, route in history:
-        memory_manager.add_turn(session_id, user_msg, agent_msg, route)
+        memory_manager.add_turn(memory_session_id, user_msg, agent_msg, route)
 
 
 async def stream_supervisor_response(
@@ -101,7 +132,8 @@ async def stream_supervisor_response(
     session_id: str = "default", 
     current_user: User | None = None, 
     db: Session | None = None,
-    user_input_mode: bool = False
+    user_input_mode: bool = False,
+    db_session_id: int | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Streams the response from the supervisor graph, yielding intermediate steps and the final result.
@@ -112,7 +144,13 @@ async def stream_supervisor_response(
     
     # Load conversation history from database into memory if we have DB access
     if db is not None and current_user is not None:
-        await load_history_into_memory(session_id, current_user.id, db)
+        await load_history_into_memory(
+            session_id,
+            current_user.id,
+            db,
+            db_session_id=db_session_id,
+            external_session_id=None if db_session_id is not None else session_id,
+        )
     
     final_state = {}
     final_response = ""
@@ -141,7 +179,9 @@ async def stream_supervisor_response(
         
         # Regular response - yield it
         final_state = result
-        final_response = result.get("result", "")
+        # Some supervisor error paths return only `response` (without `result`).
+        # Prefer `result`, then fall back to `response` so errors are surfaced to clients.
+        final_response = result.get("result") or result.get("response", "")
         
         # Yield scratchpad if present (planning mode completed)
         if result.get("scratchpad"):
@@ -170,11 +210,12 @@ async def stream_supervisor_response(
             if db is not None and current_user is not None:
                 # Use a sync helper in a thread to avoid blocking event loop
                 def _persist_sync(db, user_id, external_session_id, user_message, agent_response, route):
-                    # Find or create ChatSession using the external session identifier as session_name
-                    session = db.query(ChatSession).filter(
-                        ChatSession.session_name == external_session_id,
-                        ChatSession.user_id == user_id
-                    ).first()
+                    session = _resolve_chat_session(
+                        db,
+                        user_id,
+                        db_session_id=db_session_id,
+                        external_session_id=external_session_id,
+                    )
                     if not session:
                         session = ChatSession(user_id=user_id, session_name=external_session_id)
                         db.add(session)
@@ -217,7 +258,15 @@ async def stream_supervisor_response(
                         title = generate_chat_title(user_message, agent_response)
                     return session.id, title
 
-                session_row_id, auto_title = await asyncio.to_thread(_persist_sync, db, current_user.id, session_id, question, final_response, route)
+                session_row_id, auto_title = await asyncio.to_thread(
+                    _persist_sync,
+                    db,
+                    current_user.id,
+                    session_id,
+                    question,
+                    final_response,
+                    route,
+                )
 
                 # Emit a synthetic SSE for front-end to optionally update its list item title
                 if auto_title:
@@ -238,7 +287,9 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
     Handles chat requests, supporting both streaming and non-streaming responses.
     """
     question = request.question
-    session_id = request.get_session_id_str()
+    public_session_id = request.get_session_id_str()
+    internal_session_id = public_session_id
+    db_session_id: int | None = None
     
     # If session_id is a numeric string (from integer), verify user owns the session
     if isinstance(request.session_id, int) or (isinstance(request.session_id, str) and request.session_id.isdigit()):
@@ -254,8 +305,8 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Chat session not found or access denied"
                 )
-            # Use the session_name as the internal session_id
-            session_id = session.session_name
+            db_session_id = session.id
+            internal_session_id = _build_internal_session_key(session.id)
         except ValueError:
             pass  # Not a valid integer, treat as regular string session_id
     
@@ -267,10 +318,11 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
         return StreamingResponse(
             stream_supervisor_response(
                 question, 
-                session_id, 
+                internal_session_id, 
                 current_user=current_user, 
                 db=db,
-                user_input_mode=request.user_input_mode
+                user_input_mode=request.user_input_mode,
+                db_session_id=db_session_id,
             ),
             media_type="text/event-stream",
         )
@@ -285,7 +337,7 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
             
             result = await run_supervisor_async(
                 question, 
-                session_id, 
+                internal_session_id, 
                 user_role=(current_user.role if current_user is not None else "student"),
                 user_input_mode=user_input_mode
             )
@@ -300,17 +352,19 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
                     "scratchpad": result.get("scratchpad", []),
                     "route": result.get("route", []),
                     "planning_mode": True,
-                    "session_id": session_id
+                    "session_id": public_session_id
                 }
 
             # Persist result to DB (create/find session and store both user and agent messages)
             try:
                 if db is not None and current_user is not None:
                     def _persist_sync(db, user_id, external_session_id, user_message, agent_response, route):
-                        session = db.query(ChatSession).filter(
-                            ChatSession.session_name == external_session_id,
-                            ChatSession.user_id == user_id
-                        ).first()
+                        session = _resolve_chat_session(
+                            db,
+                            user_id,
+                            db_session_id=db_session_id,
+                            external_session_id=external_session_id,
+                        )
                         if not session:
                             session = ChatSession(user_id=user_id, session_name=external_session_id)
                             db.add(session)
@@ -349,7 +403,15 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
                             title = generate_chat_title(user_message, agent_response)
                         return session.id, title
 
-                    _sid, auto_title = await asyncio.to_thread(_persist_sync, db, current_user.id, session_id, question, result.get("result", ""), result.get("route", []))
+                    _sid, auto_title = await asyncio.to_thread(
+                        _persist_sync,
+                        db,
+                        current_user.id,
+                        public_session_id,
+                        question,
+                        result.get("result", ""),
+                        result.get("route", []),
+                    )
             except Exception:
                 # Log persistence error but don't fail the request
                 import logging
@@ -359,7 +421,7 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
             if 'title' not in result:
                 if 'route' in result:
                     pass  # keep original result untouched
-            return {**result, "session_id": session_id, **({"title": auto_title} if locals().get("auto_title") else {})}
+            return {**result, "session_id": public_session_id, **({"title": auto_title} if locals().get("auto_title") else {})}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
 

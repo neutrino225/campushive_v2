@@ -84,7 +84,8 @@ def export_faculty() -> bool:
 
 def export_faculty_react() -> bool:
     try:
-        from multiagent.agents.faculty_react_agent import faculty_react_graph
+        from multiagent.agents.faculty_react_agent import build_faculty_react_graph
+        faculty_react_graph = build_faculty_react_graph()
         return _write_png(faculty_react_graph, IMAGES_DIR / "faculty_react_graph.png", "faculty react graph")
     except Exception as e:
         print(f"[FAIL] faculty react graph: {e}")

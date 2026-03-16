@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 from vector_store_manager import VectorStoreManager, VectorStoreType
 from config import embeddings
-from app.database import get_db, User, UploadedExam
+from app.database import get_db, SessionLocal, User, UploadedExam
 from app.auth.dependencies import require_admin
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
@@ -161,6 +161,46 @@ def _save_upload_to_disk(base_dir: str, course_name: str, exam_type: str, file: 
     return dest_path
 
 
+def _process_uploaded_exam(upload_id: int, path: str, course: str) -> None:
+    """Process an uploaded exam in the background and update status."""
+    session = SessionLocal()
+    try:
+        from app.utils.exams import (
+            analyze_pdf_to_structured,
+            structured_exam_to_documents,
+            append_structured_exam_to_json,
+        )
+
+        structured = analyze_pdf_to_structured(path, course)
+        if structured is None or not getattr(structured, "questions", None):
+            raise RuntimeError("Exam analysis produced no structured questions")
+
+        struct_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "data", "structured_exams.json")
+        )
+        append_structured_exam_to_json(structured, struct_path)
+
+        docs = structured_exam_to_documents(structured, path)
+        if not docs:
+            raise RuntimeError("No vector documents were produced from the structured exam")
+
+        manager = VectorStoreManager(embeddings=embeddings)
+        manager.add_documents_to_store(VectorStoreType.EXAMS, docs)
+
+        rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
+        if rec:
+            rec.status = "processed"
+            session.commit()
+    except Exception as exc:
+        logger.exception("Failed to process uploaded exam %s", upload_id)
+        rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
+        if rec:
+            rec.status = "failed"
+            session.commit()
+    finally:
+        session.close()
+
+
 @router.post("/exams/upload", response_model=OperationResponse)
 async def upload_exam(
     background_tasks: BackgroundTasks,
@@ -168,13 +208,12 @@ async def upload_exam(
     exam_type: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    manager: VectorStoreManager = Depends(get_vector_manager),
     current_user: User = Depends(require_admin),
 ):
     """Upload an exam PDF for a course; enqueue processing and tracking."""
     try:
         # Basic validations
-        if not file.filename.lower().endswith(".pdf"):
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only PDF files are allowed")
 
         # Save to disk
@@ -194,52 +233,8 @@ async def upload_exam(
         db.commit()
         db.refresh(record)
 
-        # Background processing: parse, update structured_exams.json, add to vector store (centralized)
-        def process_upload(upload_id: int, path: str, course: str, e_type: str):
-            try:
-                # Use centralized utils for parsing and conversion
-                from app.utils.exams import (
-                    analyze_pdf_to_structured,
-                    structured_exam_to_documents,
-                    append_structured_exam_to_json,
-                )
-
-                structured = analyze_pdf_to_structured(path, course)
-                if structured is None:
-                    raise RuntimeError("Exam analysis failed")
-
-                # Append to structured exams JSON
-                struct_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "structured_exams.json"))
-                append_structured_exam_to_json(structured, struct_path)
-
-                # Convert to Documents
-                docs = structured_exam_to_documents(structured, path)
-
-                # Centralized add via manager
-                manager.add_documents_to_store(VectorStoreType.EXAMS, docs)
-
-                # Mark processed
-                with next(get_db()) as session:
-                    rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
-                    if rec:
-                        rec.status = "processed"
-                        session.commit()
-            except Exception:
-                # Mark failed
-                with next(get_db()) as session:
-                    rec = session.query(UploadedExam).filter(UploadedExam.id == upload_id).first()
-                    if rec:
-                        rec.status = "failed"
-                        session.commit()
-
-        await asyncio.get_event_loop().run_in_executor(
-            executor,
-            process_upload,
-            record.id,
-            dest_path,
-            course_name,
-            exam_type,
-        )
+        # Run actual parsing/vectorization after returning the HTTP response.
+        background_tasks.add_task(_process_uploaded_exam, record.id, dest_path, course_name)
 
         return OperationResponse(
             success=True,

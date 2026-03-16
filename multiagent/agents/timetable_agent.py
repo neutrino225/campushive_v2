@@ -615,7 +615,7 @@ Do not explain anything. Just output valid JSON.
             model=self.llm,
             tools=tools,
             # No checkpointer - stateless agent receives context via messages
-            name="Timetable Agent",
+            name="timetable_agent",
         )
 
     def get_agent(self):

@@ -57,37 +57,24 @@ def general_info_node():
 
 
 def timetable_node():
-    from ..nodes.student import _get_timetable_agent
+    from ..nodes.student import _answer_timetable_query
     from ..memory import memory_manager
 
     async def node(state: StudentState):
         q = state.get("question", "")
         session_id = state.get("session_id", "default")
         route = state.get("route", [])
-        agent = _get_timetable_agent()
         
-        # Build messages with conversation context
-        msgs = []
+        # Use prior user timetable queries as optional context for follow-ups
+        # like "Monday only", but avoid mixing assistant text into the matcher.
         history = memory_manager.get_history(session_id) or []
-        recent_turns = history[-3:]  # Last 3 turns for context
-        
-        # Add conversation history as messages
-        for turn in recent_turns:
-            msgs.append(HumanMessage(content=turn.user_message))
-            msgs.append(AIMessage(content=turn.agent_response))
-        
-        # Add current question
-        msgs.append(HumanMessage(content=q))
+        recent_turns = history[-3:]
+        recent_user_queries = [turn.user_message for turn in recent_turns if getattr(turn, "user_message", None)]
         
         accumulated = ""
         try:
-            config_dict = {"configurable": {"thread_id": f"student_timetable::{session_id}"}}
-            for step in agent.stream({"messages": msgs}, config_dict, stream_mode="values"):
-                if step.get("messages"):
-                    last_msg = step["messages"][-1]
-                    if hasattr(last_msg, "content") and isinstance(last_msg.content, str):
-                        accumulated = last_msg.content
-                        yield {**state, "result": accumulated, "route": route + ["timetable:streaming"]}
+            accumulated = _answer_timetable_query(q, conversation_history=recent_user_queries)
+            yield {**state, "result": accumulated, "route": route + ["timetable:streaming"]}
         except Exception as e:
             raise RuntimeError(f"Timetable agent API error: {e}") from e
 

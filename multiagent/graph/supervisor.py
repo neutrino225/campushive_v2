@@ -323,11 +323,11 @@ def create_faculty_worker_node():
     The faculty agent is already a ReAct agent with tools, so we configure
     it with session-based memory and wrap for delegation.
     """
-    # Build faculty agent once
-    faculty_builder = FacultyReactAgentBuilder()
+    faculty_builder = None
     
     async def faculty_worker(state: SupervisorState):
         """Execute faculty agent and return control to supervisor."""
+        nonlocal faculty_builder
         question = state.get("question", "")
         session_id = state.get("session_id", "default")
         route = state.get("route", [])
@@ -341,6 +341,8 @@ def create_faculty_worker_node():
         # Run faculty agent with session memory and capture streamed tokens
         final_answer = ""
         try:
+            if faculty_builder is None:
+                faculty_builder = FacultyReactAgentBuilder()
             for token in faculty_builder.stream(enhanced_question, session_id=session_id):
                 final_answer += token
         except Exception as e:

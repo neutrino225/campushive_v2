@@ -19,6 +19,20 @@ from langchain.retrievers import EnsembleRetriever
 # logger = logging.getLogger(__name__)
 
 
+def _dir_has_contents(path: str) -> bool:
+    try:
+        return os.path.isdir(path) and any(True for _ in os.scandir(path))
+    except OSError:
+        return False
+
+
+def _first_existing_path(*candidates: str) -> str:
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return candidates[0]
+
+
 class VectorStoreType(Enum):
     """Types of vector stores supported by the system."""
     DEGREE_PROGRAMS = "degree_programs"
@@ -202,9 +216,13 @@ class ExamDataProcessor(DataProcessor):
         for exam in data:
             course = exam.get("course", "Unknown")
             exam_type = exam.get("exam_type", "Unknown")
+            semester = exam.get("semester")
+            department = exam.get("department")
             questions = exam.get("questions", []) or []
             for question in questions:
                 content = f"Course: {course}\nExam Type: {exam_type}\n"
+                content += f"Semester: {semester or 'N/A'}\n"
+                content += f"Department: {department or 'N/A'}\n"
                 content += f"Topic: {question.get('topic', 'N/A')}\n"
                 content += f"Question: {question.get('question_text', '')}\n"
                 content += f"Marks: {question.get('marks', 'N/A')}"
@@ -213,6 +231,8 @@ class ExamDataProcessor(DataProcessor):
                     "source": f"exam:{course}:{exam.get('filename', '')}",
                     "course": course,
                     "exam_type": exam_type,
+                    "semester": semester,
+                    "department": department,
                     "topic": question.get("topic"),
                     "difficulty": question.get("difficulty"),
                     "marks": question.get("marks"),
@@ -372,12 +392,20 @@ class GeneralDataProcessor(DataProcessor):
             try:
                 loader = UnstructuredMarkdownLoader(filepath)
                 docs = loader.load()
+                if not docs:
+                    raise ValueError("UnstructuredMarkdownLoader returned no documents")
                 for doc in docs:
                     doc.metadata["source"] = filepath
                 return docs
-            except Exception as e:
-                # logger.warning(f"Error loading file {filepath}: {e}")
-                return []
+            except Exception:
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                    if not content:
+                        return []
+                    return [Document(page_content=content, metadata={"source": filepath})]
+                except Exception:
+                    return []
         
         # Load files in parallel
         # Suppress "Need to load profiles" messages from unstructured library
@@ -405,11 +433,31 @@ class VectorStoreManager:
     
     def __init__(self, base_data_dir: str = "data", embeddings=None):
         self.base_data_dir = base_data_dir
-        self.vector_stores_dir = os.path.join(base_data_dir, "vector_stores")
+        preferred_vector_stores_dir = os.path.join(base_data_dir, "vector_stores")
+        legacy_vector_stores_dir = os.path.join(base_data_dir, "vectorstores")
+        if _dir_has_contents(legacy_vector_stores_dir) and not _dir_has_contents(preferred_vector_stores_dir):
+            self.vector_stores_dir = legacy_vector_stores_dir
+        else:
+            self.vector_stores_dir = preferred_vector_stores_dir
         self.embeddings = embeddings
         
         # Ensure directories exist
         os.makedirs(self.vector_stores_dir, exist_ok=True)
+
+        faculty_source = _first_existing_path(
+            os.path.join(base_data_dir, "faculty"),
+            os.path.join(base_data_dir, "raw", "faculty"),
+        )
+        general_source = _first_existing_path(
+            os.path.join(base_data_dir, "general", "raw"),
+            os.path.join(base_data_dir, "raw", "general"),
+        )
+        degree_programs_source = _first_existing_path(
+            os.path.join(base_data_dir, "degree_programs", "degree_programs.json"),
+        )
+        exams_source = _first_existing_path(
+            os.path.join(base_data_dir, "structured_exams.json"),
+        )
         
         # Data processors
         self.processors = {
@@ -424,7 +472,7 @@ class VectorStoreManager:
             VectorStoreType.DEGREE_PROGRAMS: VectorStoreConfig(
                 store_type=VectorStoreType.DEGREE_PROGRAMS,
                 persist_dir=os.path.join(self.vector_stores_dir, "degree_programs"),
-                data_source=os.path.join(base_data_dir, "degree_programs", "degree_programs.json"),
+                data_source=degree_programs_source,
                 chunk_size=1000,
                 chunk_overlap=200,
                 bm25_k=15,
@@ -435,7 +483,7 @@ class VectorStoreManager:
             VectorStoreType.FACULTY: VectorStoreConfig(
                 store_type=VectorStoreType.FACULTY,
                 persist_dir=os.path.join(self.vector_stores_dir, "faculty"),
-                data_source=os.path.join(base_data_dir, "faculty"),
+                data_source=faculty_source,
                 chunk_size=800,
                 chunk_overlap=150,
                 bm25_k=12,
@@ -446,7 +494,7 @@ class VectorStoreManager:
             VectorStoreType.GENERAL: VectorStoreConfig(
                 store_type=VectorStoreType.GENERAL,
                 persist_dir=os.path.join(self.vector_stores_dir, "general"),
-                data_source=os.path.join(base_data_dir, "general", "raw"),
+                data_source=general_source,
                 chunk_size=1500,  # Increased to capture complete procedures
                 chunk_overlap=300,  # Increased overlap to ensure continuity
                 bm25_k=20,  # Retrieve more documents for better coverage
@@ -457,7 +505,7 @@ class VectorStoreManager:
             VectorStoreType.EXAMS: VectorStoreConfig(
                 store_type=VectorStoreType.EXAMS,
                 persist_dir=os.path.join(self.vector_stores_dir, "exams"),
-                data_source=os.path.join(base_data_dir, "structured_exams.json"),
+                data_source=exams_source,
                 chunk_size=500,
                 chunk_overlap=100,
                 bm25_k=20,
@@ -565,6 +613,21 @@ class VectorStoreManager:
             separators=["\n\n", "\n", ". ", " "]
         )
         split_docs = text_splitter.split_documents(documents)
+
+        if not split_docs:
+            return vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": config.embed_k}
+            )
+
+        try:
+            collection = getattr(vector_store, "_collection", None)
+            if collection is not None and collection.count() == 0:
+                bm25_retriever = BM25Retriever.from_documents(split_docs)
+                bm25_retriever.k = config.bm25_k
+                return bm25_retriever
+        except Exception:
+            pass
         
         # Create BM25 retriever
         bm25_retriever = BM25Retriever.from_documents(split_docs)

@@ -135,9 +135,11 @@ class FacultyAgent:
     def __init__(self, debug: bool = False):
         self.debug = debug
         self.manager = VectorStoreManager(embeddings=embeddings)
-        data_dir = os.path.join("data", "faculty")
+        data_dir = self.manager.configs[VectorStoreType.FACULTY].data_source
+        self.data_dir = data_dir
         self.people: List[Dict[str, Any]] = _load_faculty_jsons(data_dir)
-        
+        self.retriever = None
+
         # Build simple name/email indexes
         self.name_index: Dict[str, Dict[str, Any]] = {}
         self.email_index: Dict[str, Dict[str, Any]] = {}
@@ -148,9 +150,16 @@ class FacultyAgent:
             em = _norm_whitespace(str(person.get("Email") or "")).lower()
             if em:
                 self.email_index[em] = person
-        
-        # Retriever (vector DB) for semantic fallback
-        self.retriever = self.manager.get_retriever(VectorStoreType.FACULTY, use_ensemble=True)
+
+        # Faculty data is optional in local/dev setups. Missing sources should
+        # not prevent the API from importing or starting.
+        if os.path.isdir(data_dir):
+            try:
+                self.retriever = self.manager.get_retriever(
+                    VectorStoreType.FACULTY, use_ensemble=True
+                )
+            except FileNotFoundError:
+                self.retriever = None
         self.prompt = PromptTemplate(
             input_variables=["context", "question"],
             template=(
@@ -195,6 +204,11 @@ class FacultyAgent:
         return None
 
     def _semantic_answer(self, question: str, stream: bool = True) -> str:
+        if self.retriever is None:
+            return (
+                "Faculty data is not available in this environment. "
+                f"Expected source directory: {self.data_dir}"
+            )
         try:
             docs = self.retriever.invoke(question)
             context = "\n".join([doc.page_content for doc in docs])
@@ -519,6 +533,11 @@ class FacultyAgent:
 
     # ---------------- Public API ----------------
     def answer(self, question: str, stream: bool = True) -> str:
+        if not self.people and self.retriever is None:
+            return (
+                "Faculty data is not available in this environment. "
+                f"Expected source directory: {self.data_dir}"
+            )
         latest_query = self._extract_latest_user_query(question) or question
         field = self._infer_field(latest_query)
         person = self._resolve_person_from_text(question)
@@ -1157,7 +1176,7 @@ class FacultyReactAgentBuilder:
             model=llm,
             tools=tools,
             # No checkpointer - stateless agent receives context via messages
-            name="Faculty Agent",
+            name="faculty_agent",
         )
 
     def get_agent(self):
@@ -1197,5 +1216,5 @@ def build_faculty_react_graph():
     return FacultyReactAgentBuilder().get_agent()
 
 
-# Export for importers (optional)
-faculty_react_graph = build_faculty_react_graph()
+# Export name kept for compatibility without eager graph construction.
+faculty_react_graph = None
